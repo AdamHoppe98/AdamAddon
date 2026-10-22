@@ -1,0 +1,20 @@
+## Interface: 16001
+# ^ Placeholder. Check in game with: /dump select(4, GetBuildInfo())
+## Title: AdamAddon
+## Notes: Adam's personal toolbox. Click the minimap icon or type /adam.
+## Author: Adam Hoppe
+## Version: 0.1.0
+## SavedVariables: AdamAddonDB
+## IconTexture: Interface\Icons\INV_Scroll_04
+## AddonCompartmentFunc: AdamAddon_OnAddonCompartmentClick
+
+# Core (load first)
+Core.lua
+Commands.lua
+
+# UI
+UI\MainWindow.lua
+UI\MinimapButton.lua
+
+# Features (one file per feature)
+Features\Welcome.lua
