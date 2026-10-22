@@ -1,0 +1,8 @@
+package-as: AdamAddon
+
+# Development files that must not end up in the zip players download.
+ignore:
+  - .claude
+  - .gitignore
+  - .pkgmeta
+  - README.md

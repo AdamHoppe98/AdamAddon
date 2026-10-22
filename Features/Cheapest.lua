@@ -1,7 +1,8 @@
 local addonName, ns = ...
 
 -- A small always-on list of the 5 bag items a vendor would pay least for, so you can
--- make room. Ctrl + left-click a row to delete that item.
+-- make room. Ctrl + left-click a row to delete that item; Shift + left-click hides that
+-- item from the list for good (every stack of it), until the hidden list is cleared.
 --
 -- Only the backpack and the four normal bags are scanned; the reagent bag is skipped.
 -- Items with no sell price are left out. Value is the whole stack (price x count).
@@ -14,6 +15,7 @@ local Cheapest = ns:RegisterModule("Cheapest", {
 		shown = true,
 		locked = true,
 		position = nil, -- { point, relativePoint, x, y }; nil = default
+		hidden = {},    -- [itemID] = true for items never shown in the list
 	},
 	commands = {
 		cheapestlist = {
@@ -53,7 +55,7 @@ local function ScanBags()
 	for bag = FIRST_BAG, LAST_BAG do
 		for slot = 1, C_Container.GetContainerNumSlots(bag) do
 			local info = C_Container.GetContainerItemInfo(bag, slot)
-			if info and not info.hasNoValue then
+			if info and not info.hasNoValue and not Cheapest.db.hidden[info.itemID] then
 				local sellPrice = GetSellPrice(info.itemID)
 				if sellPrice == nil then
 					-- Not cached yet; GET_ITEM_INFO_RECEIVED refreshes the list.
@@ -125,6 +127,73 @@ function Cheapest:DeleteItem(item)
 end
 
 ---------------------------------------------------------------------------
+-- Hiding
+---------------------------------------------------------------------------
+
+local function CountHidden()
+	local count = 0
+	for _ in pairs(Cheapest.db.hidden) do
+		count = count + 1
+	end
+	return count
+end
+
+-- Name (quality-coloured link if the item is cached) and icon for an item that may not
+-- be in the bags any more.
+local function GetHiddenItemDisplay(itemID)
+	local link = select(2, C_Item.GetItemInfo(itemID))
+	local name = link or C_Item.GetItemNameByID(itemID)
+	if not name then
+		-- Not cached; GET_ITEM_INFO_RECEIVED refreshes the list once it loads.
+		C_Item.RequestLoadItemDataByID(itemID)
+		name = "Item #" .. itemID
+	end
+	return name, C_Item.GetItemIconByID(itemID)
+end
+
+function Cheapest:UnhideItem(itemID)
+	self.db.hidden[itemID] = nil
+	self:Refresh()
+	self:UpdateHiddenText()
+end
+
+-- Updates the count and the list of hidden items on the page.
+function Cheapest:UpdateHiddenText()
+	if not self.hiddenText then
+		return
+	end
+	local count = CountHidden()
+	if count == 0 then
+		self.hiddenText:SetText("No hidden items. Shift + left-click an item in the list to hide it.")
+	else
+		self.hiddenText:SetText("Hidden items (" .. count .. ") - click one to show it in the list again:")
+	end
+
+	local entries = {}
+	for itemID in pairs(self.db.hidden) do
+		local name, icon = GetHiddenItemDisplay(itemID)
+		table.insert(entries, { itemID = itemID, name = name, icon = icon })
+	end
+	table.sort(entries, function(a, b)
+		return a.itemID < b.itemID
+	end)
+	self.hiddenScrollBox:SetDataProvider(CreateDataProvider(entries), ScrollBoxConstants.RetainScrollPosition)
+end
+
+function Cheapest:HideItem(item)
+	self.db.hidden[item.itemID] = true
+	self:Print("hiding " .. (item.link or "item") .. " from the cheapest list. Clear it on the Cheapest Items page.")
+	self:Refresh()
+	self:UpdateHiddenText()
+end
+
+function Cheapest:ClearHidden()
+	wipe(self.db.hidden)
+	self:Refresh()
+	self:UpdateHiddenText()
+end
+
+---------------------------------------------------------------------------
 -- The list frame
 ---------------------------------------------------------------------------
 
@@ -155,14 +224,18 @@ local function CreateRow(parent, index)
 		GameTooltip:SetOwner(self, "ANCHOR_LEFT")
 		GameTooltip:SetBagItem(self.item.bag, self.item.slot)
 		GameTooltip:AddLine("Ctrl + left-click to delete", 1, 0.3, 0.3)
+		GameTooltip:AddLine("Shift + left-click to hide from this list", 0.6, 0.8, 1)
 		GameTooltip:Show()
 	end)
 	row:SetScript("OnLeave", function()
 		GameTooltip:Hide()
 	end)
 	row:SetScript("OnClick", function(self)
-		if IsControlKeyDown() then
+		-- Both keys held: do nothing rather than guess.
+		if IsControlKeyDown() and not IsShiftKeyDown() then
 			Cheapest:DeleteItem(self.item)
+		elseif IsShiftKeyDown() and not IsControlKeyDown() then
+			Cheapest:HideItem(self.item)
 		end
 	end)
 
@@ -288,9 +361,14 @@ function Cheapest:OnBagsChanged()
 	self:Refresh()
 end
 
-function Cheapest:OnItemInfoReceived()
+function Cheapest:OnItemInfoReceived(event, itemID, success)
 	if pendingItemInfo then
 		self:Refresh()
+	end
+	-- A hidden item's name may just have loaded. Only on success: a failed load would
+	-- request it again and loop.
+	if success and self.db and self.db.hidden[itemID] and self.hiddenScrollBox and self.hiddenScrollBox:IsVisible() then
+		self:UpdateHiddenText()
 	end
 end
 
@@ -312,6 +390,45 @@ local function CreateCheck(parent, text, checked, onClick)
 	return check
 end
 
+local HIDDEN_ROW_HEIGHT = 20
+
+-- Rows are recycled by the scroll box; the children are built the first time only.
+local function InitializeHiddenRow(row, entry)
+	if not row.Icon then
+		row:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
+		row:RegisterForClicks("LeftButtonUp")
+
+		row.Icon = row:CreateTexture(nil, "ARTWORK")
+		row.Icon:SetSize(HIDDEN_ROW_HEIGHT - 4, HIDDEN_ROW_HEIGHT - 4)
+		row.Icon:SetPoint("LEFT", 2, 0)
+		row.Icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+
+		row.Name = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		row.Name:SetPoint("LEFT", row.Icon, "RIGHT", 6, 0)
+		row.Name:SetPoint("RIGHT", -4, 0)
+		row.Name:SetJustifyH("LEFT")
+		row.Name:SetWordWrap(false)
+
+		row:SetScript("OnEnter", function(self)
+			GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+			GameTooltip:SetItemByID(self.itemID)
+			GameTooltip:AddLine("Click to show it in the cheapest list again", 0.6, 0.8, 1)
+			GameTooltip:Show()
+		end)
+		row:SetScript("OnLeave", function()
+			GameTooltip:Hide()
+		end)
+		row:SetScript("OnClick", function(self)
+			GameTooltip:Hide()
+			Cheapest:UnhideItem(self.itemID)
+		end)
+	end
+
+	row.itemID = entry.itemID
+	row.Icon:SetTexture(entry.icon)
+	row.Name:SetText(entry.name)
+end
+
 function Cheapest:CreatePage(page)
 	local module = self
 
@@ -324,7 +441,9 @@ function Cheapest:CreatePage(page)
 	help:SetPoint("RIGHT", page, "RIGHT", -4, 0)
 	help:SetJustifyH("LEFT")
 	help:SetText("An on-screen list of the 5 bag items worth least at a vendor (whole stack). "
-		.. "Reagent bag not included. |cffff5050Ctrl + left-click a row deletes the item, without asking.|r")
+		.. "Reagent bag not included. |cffff5050Ctrl + left-click a row deletes the item, without asking.|r "
+		.. "|cff99ccffShift + left-click hides that item from the list.|r "
+		.. "|cffffd100/adam cheapestlist|r shows or hides the list.")
 
 	local shownCheck = CreateCheck(page, "Show the list", self.db.shown, function(checked)
 		module:SetShown(checked)
@@ -346,14 +465,39 @@ function Cheapest:CreatePage(page)
 		module:ResetPosition()
 	end)
 
-	local note = page:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-	note:SetPoint("TOPLEFT", reset, "BOTTOMLEFT", 0, -12)
-	note:SetPoint("RIGHT", page, "RIGHT", -4, 0)
-	note:SetJustifyH("LEFT")
-	note:SetText("Type |cffffd100/adam cheapestlist|r to show or hide the list.")
+	local clearHidden = CreateFrame("Button", nil, page, "UIPanelButtonTemplate")
+	clearHidden:SetPoint("LEFT", reset, "RIGHT", 8, 0)
+	clearHidden:SetSize(160, 22)
+	clearHidden:SetText("Clear hidden items")
+	clearHidden:SetScript("OnClick", function()
+		module:ClearHidden()
+	end)
+
+	self.hiddenText = page:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	self.hiddenText:SetPoint("TOPLEFT", reset, "BOTTOMLEFT", 0, -12)
+	self.hiddenText:SetPoint("RIGHT", page, "RIGHT", -4, 0)
+	self.hiddenText:SetJustifyH("LEFT")
+
+	-- Scrollable list of hidden items; click a row to show that item again.
+	local scrollBox = CreateFrame("Frame", nil, page, "WowScrollBoxList")
+	scrollBox:SetPoint("TOPLEFT", self.hiddenText, "BOTTOMLEFT", 0, -6)
+	scrollBox:SetPoint("BOTTOMRIGHT", page, "BOTTOMRIGHT", -16, 4)
+
+	local scrollBar = CreateFrame("EventFrame", nil, page, "MinimalScrollBar")
+	scrollBar:SetPoint("TOPLEFT", scrollBox, "TOPRIGHT", 4, 0)
+	scrollBar:SetPoint("BOTTOMLEFT", scrollBox, "BOTTOMRIGHT", 4, 0)
+
+	local view = CreateScrollBoxListLinearView()
+	view:SetElementExtent(HIDDEN_ROW_HEIGHT)
+	view:SetElementInitializer("Button", InitializeHiddenRow)
+	ScrollUtil.InitScrollBoxListWithScrollBar(scrollBox, scrollBar, view)
+	self.hiddenScrollBox = scrollBox
+
+	self:UpdateHiddenText()
 end
 
 function Cheapest:OnPageShown(page)
 	self.shownCheck:SetChecked(self.db.shown)
 	self.lockCheck:SetChecked(self.db.locked)
+	self:UpdateHiddenText()
 end
