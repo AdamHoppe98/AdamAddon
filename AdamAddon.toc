@@ -1,5 +1,5 @@
 ## Interface: 16001
-# ^ Placeholder. Check in game with: /dump select(4, GetBuildInfo())
+# ^ WoW Forever beta client. Recheck on the live client: /dump select(4, GetBuildInfo())
 ## Title: AdamAddon
 ## Notes: Adam's personal toolbox. Click the minimap icon or type /adam.
 ## Author: Adam Hoppe
