@@ -1,0 +1,6 @@
+# Keep development files out of GitHub's "Source code" zips (git archive).
+# The CurseForge package uses .pkgmeta instead.
+.claude export-ignore
+.gitignore export-ignore
+.gitattributes export-ignore
+.pkgmeta export-ignore
