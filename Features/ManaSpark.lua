@@ -195,6 +195,7 @@ local function CreateSlider(module, parent, anchor, labelText, key, range)
 			module:ApplyLook()
 		end
 	end, slider)
+	ns.MakeSliderEditable(slider)
 	return slider, label
 end
 

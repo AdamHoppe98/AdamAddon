@@ -7,7 +7,7 @@ local MainWindow = {}
 ns.MainWindow = MainWindow
 
 local WINDOW_WIDTH = 640
-local WINDOW_HEIGHT = 420
+local WINDOW_HEIGHT = 560
 local NAV_WIDTH = 150
 local NAV_BUTTON_HEIGHT = 22
 
@@ -46,8 +46,10 @@ local function CreateNavButton(parent, module, index)
 	button.Selected:SetAllPoints()
 	button.Selected:Hide()
 
-	button.Text = button:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-	button.Text:SetPoint("LEFT", 8, 0)
+	-- Pages with a navParent are listed indented, in white, under that page.
+	local isChild = module.navParent ~= nil
+	button.Text = button:CreateFontString(nil, "OVERLAY", isChild and "GameFontHighlightSmall" or "GameFontNormal")
+	button.Text:SetPoint("LEFT", isChild and 20 or 8, 0)
 	button.Text:SetPoint("RIGHT", -4, 0)
 	button.Text:SetJustifyH("LEFT")
 	button.Text:SetText(module.title)
@@ -80,6 +82,25 @@ local function BuildFrame()
 
 	-- ESC closes the window.
 	table.insert(UISpecialFrames, frame:GetName())
+
+	-- Unlock for all movable frames (Features/Layout.lua), in the title bar so it's there
+	-- on every page. Closing the window locks them again.
+	local unlockCheck = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
+	unlockCheck:SetSize(22, 22)
+	unlockCheck:SetPoint("TOPLEFT", 4, 0)
+	unlockCheck.Text:SetFontObject("GameFontNormalSmall")
+	unlockCheck.Text:SetText("Unlock frames")
+	unlockCheck:SetScript("OnClick", function(button)
+		if ns.SetUnlocked then
+			ns.SetUnlocked(button:GetChecked())
+		end
+	end)
+	frame.UnlockCheck = unlockCheck
+	frame:HookScript("OnHide", function()
+		if ns.SetUnlocked then
+			ns.SetUnlocked(false)
+		end
+	end)
 
 	local nav = CreateFrame("Frame", nil, frame)
 	nav:SetPoint("TOPLEFT", 10, -32)
@@ -114,6 +135,13 @@ end
 
 function MainWindow:Init()
 	BuildFrame()
+end
+
+-- Called by Layout when frames are locked or unlocked.
+function MainWindow:SetUnlockChecked(checked)
+	if frame then
+		frame.UnlockCheck:SetChecked(checked)
+	end
 end
 
 function MainWindow:ShowPage(name)

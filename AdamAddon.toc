@@ -19,6 +19,8 @@ UI\MinimapButton.lua
 
 # Features (one file per feature)
 Features\Welcome.lua
+Features\Fonts.lua
+Features\Layout.lua
 Features\ActionBars.lua
 Features\UnitFrames.lua
 Features\PowerBar.lua

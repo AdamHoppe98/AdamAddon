@@ -6,14 +6,15 @@ local addonName, ns = ...
 --
 -- Only the backpack and the four normal bags are scanned; the reagent bag is skipped.
 -- Items with no sell price are left out. Value is the whole stack (price x count).
--- The page in the main window holds the settings (show, lock, reset position).
+-- The header shows used / total bag slots for those same bags, red when full.
+-- The page in the main window holds the settings (show, reset position). Moving it is
+-- the window's Unlock frames checkbox and the Layout page, like the other frames.
 
 local Cheapest = ns:RegisterModule("Cheapest", {
 	title = "Cheapest Items",
 	order = 30,
 	defaults = {
 		shown = true,
-		locked = true,
 		position = nil, -- { point, relativePoint, x, y }; nil = default
 		hidden = {},    -- [itemID] = true for items never shown in the list
 	},
@@ -255,15 +256,19 @@ local function SetRow(row, item)
 	row:Show()
 end
 
-local function SavePosition()
-	local point, _, relativePoint, x, y = frame:GetPoint(1)
-	Cheapest.db.position = { point, relativePoint, x, y }
-end
-
 local function RestorePosition()
 	local position = Cheapest.db.position or DEFAULT_POSITION
 	frame:ClearAllPoints()
 	frame:SetPoint(position[1], UIParent, position[2], position[3], position[4])
+end
+
+-- Called by Layout (dragging, snapping, the X/Y sliders) with the list's centre offset
+-- from the screen centre. Stored by its top edge, so the top stays put while the list
+-- grows and shrinks with the number of rows.
+local function SetPosition(x, y)
+	local top = y + frame:GetHeight() / 2
+	Cheapest.db.position = { "TOP", "CENTER", x, math.floor(top + 0.5) }
+	RestorePosition()
 end
 
 local function CreateListFrame()
@@ -274,14 +279,20 @@ local function CreateListFrame()
 	frame:SetMovable(true)
 	frame:EnableMouse(true)
 	frame:RegisterForDrag("LeftButton")
+	-- Dragged by its background while the window's Unlock frames is ticked.
 	frame:SetScript("OnDragStart", function(self)
-		if not Cheapest.db.locked then
+		if ns.IsUnlocked and ns.IsUnlocked() then
 			self:StartMoving()
+			self.moving = true
 		end
 	end)
 	frame:SetScript("OnDragStop", function(self)
+		if not self.moving then
+			return
+		end
+		self.moving = false
 		self:StopMovingOrSizing()
-		SavePosition()
+		ns.MoverDropped("cheapest") -- snaps and saves
 	end)
 
 	local background = frame:CreateTexture(nil, "BACKGROUND")
@@ -291,6 +302,11 @@ local function CreateListFrame()
 	local title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
 	title:SetPoint("TOPLEFT", 6, -4)
 	title:SetText("Cheapest items")
+
+	-- Used / total bag slots, top right; red when the bags are full.
+	frame.SpaceText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+	frame.SpaceText:SetPoint("TOPRIGHT", -6, -4)
+	frame.SpaceText:SetJustifyH("RIGHT")
 
 	frame.EmptyText = frame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
 	frame.EmptyText:SetPoint("TOPLEFT", 6, -HEADER_HEIGHT - 2)
@@ -303,9 +319,28 @@ local function CreateListFrame()
 	RestorePosition()
 end
 
+-- Free and total slots in the same bags the list scans: the backpack and the four bags,
+-- not the reagent bag.
+local function GetBagSpace()
+	local free, total = 0, 0
+	for bag = FIRST_BAG, LAST_BAG do
+		free = free + (C_Container.GetContainerNumFreeSlots(bag) or 0)
+		total = total + C_Container.GetContainerNumSlots(bag)
+	end
+	return free, total
+end
+
 function Cheapest:Refresh()
 	if not frame or not frame:IsShown() then
 		return
+	end
+
+	local free, total = GetBagSpace()
+	frame.SpaceText:SetFormattedText("%d/%d", total - free, total) -- used / total
+	if free == 0 then
+		frame.SpaceText:SetTextColor(1, 0.2, 0.2)
+	else
+		frame.SpaceText:SetTextColor(1, 1, 1)
 	end
 
 	local items = ScanBags()
@@ -336,15 +371,26 @@ function Cheapest:SetShown(shown)
 	end
 end
 
-function Cheapest:SetLocked(locked)
-	self.db.locked = locked
-end
-
 function Cheapest:ResetPosition()
 	self.db.position = nil
 	if frame then
 		RestorePosition()
 	end
+end
+
+if ns.RegisterMover then
+	ns:RegisterMover("cheapest", {
+		title = "Cheapest items list",
+		getFrame = function()
+			return frame
+		end,
+		save = SetPosition,
+	})
+end
+
+-- Locking is the window's Unlock frames checkbox now, for all frames at once.
+function Cheapest:OnInit()
+	self.db.locked = nil
 end
 
 ---------------------------------------------------------------------------
@@ -451,14 +497,8 @@ function Cheapest:CreatePage(page)
 	shownCheck:SetPoint("TOPLEFT", help, "BOTTOMLEFT", -4, -10)
 	self.shownCheck = shownCheck
 
-	local lockCheck = CreateCheck(page, "Lock the list (untick to drag it by its background)", self.db.locked, function(checked)
-		module:SetLocked(checked)
-	end)
-	lockCheck:SetPoint("TOPLEFT", shownCheck, "BOTTOMLEFT", 0, 2)
-	self.lockCheck = lockCheck
-
 	local reset = CreateFrame("Button", nil, page, "UIPanelButtonTemplate")
-	reset:SetPoint("TOPLEFT", lockCheck, "BOTTOMLEFT", 4, -10)
+	reset:SetPoint("TOPLEFT", shownCheck, "BOTTOMLEFT", 4, -10)
 	reset:SetSize(140, 22)
 	reset:SetText("Reset position")
 	reset:SetScript("OnClick", function()
@@ -498,6 +538,5 @@ end
 
 function Cheapest:OnPageShown(page)
 	self.shownCheck:SetChecked(self.db.shown)
-	self.lockCheck:SetChecked(self.db.locked)
 	self:UpdateHiddenText()
 end

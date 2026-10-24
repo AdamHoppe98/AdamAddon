@@ -43,6 +43,65 @@ local function ApplyDefaults(target, defaults)
 end
 ns.ApplyDefaults = ApplyDefaults
 
+-- Lets a MinimalSliderWithSteppersTemplate slider take a typed value: double-click the
+-- value to its right, type a number, Enter applies it (kept within the slider's range),
+-- Escape or clicking elsewhere cancels. The value goes through slider:SetValue, so the
+-- slider's own OnValueChanged callbacks save it as if it had been dragged.
+function ns.MakeSliderEditable(slider)
+	local valueText = slider.RightText
+
+	local hitBox = CreateFrame("Button", nil, slider)
+	hitBox:SetPoint("TOPLEFT", valueText, "TOPLEFT", -4, 4)
+	hitBox:SetPoint("BOTTOMRIGHT", valueText, "BOTTOMRIGHT", 4, -4)
+	hitBox:SetFrameLevel(slider:GetFrameLevel() + 5)
+	hitBox:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+		GameTooltip:SetText("Double-click to type a value")
+		GameTooltip:Show()
+	end)
+	hitBox:SetScript("OnLeave", function()
+		GameTooltip:Hide()
+	end)
+
+	local editBox = CreateFrame("EditBox", nil, slider, "InputBoxTemplate")
+	editBox:SetSize(60, 20)
+	editBox:SetPoint("LEFT", slider.Slider, "RIGHT", 30, 0)
+	editBox:SetFrameLevel(hitBox:GetFrameLevel() + 1)
+	editBox:SetAutoFocus(false)
+	editBox:SetMaxLetters(8)
+	editBox:Hide()
+
+	local function Close()
+		editBox:Hide()
+		valueText:SetAlpha(1)
+	end
+
+	editBox:SetScript("OnEnterPressed", function(self)
+		local value = tonumber(self:GetText())
+		if value then
+			local minValue, maxValue = slider.Slider:GetMinMaxValues()
+			slider:SetValue(math.max(minValue, math.min(maxValue, value)))
+		end
+		self:ClearFocus()
+	end)
+	editBox:SetScript("OnEscapePressed", function(self)
+		self:ClearFocus()
+	end)
+	editBox:SetScript("OnEditFocusLost", Close)
+
+	hitBox:SetScript("OnDoubleClick", function()
+		-- A greyed-out slider doesn't take typed values either.
+		if slider.IsSliderEnabled and not slider:IsSliderEnabled() then
+			return
+		end
+		editBox:SetText(tostring(math.floor(slider.Slider:GetValue() + 0.5)))
+		valueText:SetAlpha(0)
+		editBox:Show()
+		editBox:SetFocus()
+		editBox:HighlightText()
+	end)
+end
+
 ---------------------------------------------------------------------------
 -- Events: any file can listen with ns:RegisterEvent(event, func)
 ---------------------------------------------------------------------------
@@ -173,6 +232,14 @@ end
 -- Startup
 ---------------------------------------------------------------------------
 
+-- Runs one module's OnInit / OnLogin on its own: an error is still reported (Blizzard's
+-- error handler, so it shows like any other Lua error), but the other modules carry on.
+local function CallModule(module, method)
+	xpcall(function()
+		module[method](module)
+	end, geterrorhandler())
+end
+
 local function OnAddonLoaded(event, loadedName)
 	if loadedName ~= addonName then
 		return
@@ -186,7 +253,7 @@ local function OnAddonLoaded(event, loadedName)
 		ns.db.modules[module.name] = ApplyDefaults(ns.db.modules[module.name] or {}, module.defaults or {})
 		module.db = ns.db.modules[module.name]
 		if module.OnInit then
-			module:OnInit()
+			CallModule(module, "OnInit")
 		end
 	end
 
@@ -197,7 +264,7 @@ end
 local function OnPlayerLogin()
 	for _, module in ipairs(ns.modules) do
 		if module.OnLogin then
-			module:OnLogin()
+			CallModule(module, "OnLogin")
 		end
 	end
 end

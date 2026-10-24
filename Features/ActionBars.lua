@@ -1,7 +1,8 @@
 local addonName, ns = ...
 
 -- Restyles Blizzard's action buttons: square icons, a 2 px black border instead of the
--- round frame art, transparent slot background, and a chosen font for the button texts.
+-- round frame art, transparent slot background, and the addon's font (the Fonts page)
+-- for the button texts.
 -- Everything is undone when the feature is switched off on its page.
 --
 -- The buttons are secure, so changes are only made out of combat. A change asked for
@@ -12,10 +13,8 @@ local ActionBars = ns:RegisterModule("ActionBars", {
 	order = 10,
 	defaults = {
 		enabled = true,
-		showBorder = false, -- black border on buttons and on the unit frames
+		borderSize = 1,     -- black border on the buttons, as on the unit frames; 0 = none
 		backgroundOpacity = 0, -- percent; black square fill behind the icon
-		font = "default",   -- key in FONTS, or a LibSharedMedia font name
-		outline = "OUTLINE",
 		hotkeySize = 12,
 		countSize = 14,
 		nameSize = 10,
@@ -48,59 +47,13 @@ local BUTTON_PREFIXES = {
 local BUTTONS_PER_BAR = 12
 
 local ICON_CROP = 0.08
-local BORDER_PIXELS = 1.3
 
 -- Cooldown swipes are inset 2-3 px for the round art; stretch them out to the border.
 local COOLDOWNS = { "cooldown", "chargeCooldown", "lossOfControlCooldown" }
 
--- Built-in fonts. "default" keeps Blizzard's own font objects.
-local FONTS = {
-	{ key = "default", name = "Blizzard default" },
-	{ key = "friz", name = "Friz Quadrata", path = "Fonts\\FRIZQT__.TTF" },
-	{ key = "arialn", name = "Arial Narrow", path = "Fonts\\ARIALN.TTF" },
-	{ key = "morpheus", name = "Morpheus", path = "Fonts\\MORPHEUS.ttf" },
-	{ key = "skurri", name = "Skurri", path = "Fonts\\skurri.ttf" },
-}
-
-local OUTLINES = {
-	{ key = "", name = "None" },
-	{ key = "OUTLINE", name = "Outline" },
-	{ key = "THICKOUTLINE", name = "Thick outline" },
-	{ key = "MONOCHROME, OUTLINE", name = "Monochrome outline" },
-}
-
 -- Per-button state lives here, not on Blizzard's frames, to keep their tables untouched.
 local styled = {}   -- [button] = { saved originals and our own textures }
 local pendingRefresh = false
-
----------------------------------------------------------------------------
--- Fonts
----------------------------------------------------------------------------
-
--- LibSharedMedia is optional; other addons (e.g. Plater) often load it.
-local function GetSharedMedia()
-	return LibStub and LibStub("LibSharedMedia-3.0", true)
-end
-
-local function GetFontPath(key)
-	for _, font in ipairs(FONTS) do
-		if font.key == key then
-			return font.path
-		end
-	end
-	local media = GetSharedMedia()
-	if media and key then
-		return media:Fetch("font", key, true)
-	end
-end
-
--- Shared with UnitFrames so both features use the same border and font.
-ns.borderPixels = BORDER_PIXELS
-
-function ns.IsBorderShown()
-	return ActionBars.db == nil or ActionBars.db.showBorder
-end
-ns.GetFontPath = GetFontPath
 
 ---------------------------------------------------------------------------
 -- Saving and restoring Blizzard's art
@@ -161,9 +114,14 @@ end
 -- Styling one button
 ---------------------------------------------------------------------------
 
--- Border thickness in screen pixels, snapped to whole pixels at the button's scale.
+-- Border thickness in whole screen pixels at the button's scale, worked out the same way
+-- as the unit frames' and power bar's border; 0 = none.
 local function GetBorderSize(button)
-	return PixelUtil.GetNearestPixelSize(BORDER_PIXELS, button:GetEffectiveScale(), BORDER_PIXELS)
+	local size = ActionBars.db.borderSize
+	if size <= 0 then
+		return 0
+	end
+	return PixelUtil.GetNearestPixelSize(size, button:GetEffectiveScale(), 1)
 end
 
 local function CreateBorder(button)
@@ -277,7 +235,7 @@ local function StyleButton(button, db)
 	end
 
 	-- Without a border the swipe covers the whole button.
-	local pixel = db.showBorder and GetBorderSize(button) or 0
+	local pixel = GetBorderSize(button)
 	for key in pairs(state.cooldownPoints) do
 		local cooldown = button[key]
 		cooldown:ClearAllPoints()
@@ -286,21 +244,21 @@ local function StyleButton(button, db)
 	end
 
 	LayoutBorder(button, state.border)
-	SetBorderShown(state.border, db.showBorder)
+	SetBorderShown(state.border, pixel > 0)
 
-	-- Fonts.
-	local fontPath = GetFontPath(db.font)
+	-- Fonts: the addon's font and outline, our sizes.
+	local fontPath, outline = ns.GetFont()
 	local sizes = { HotKey = db.hotkeySize, Count = db.countSize, Name = db.nameSize }
 	for key, saved in pairs(state.fonts) do
 		local fontString = button[key]
 		RestoreFontString(fontString, saved)
 		if fontPath then
-			fontString:SetFont(fontPath, sizes[key], db.outline)
+			fontString:SetFont(fontPath, sizes[key], outline)
 		else
 			-- Blizzard's face, our size and outline.
 			local path = fontString:GetFont()
 			if path then
-				fontString:SetFont(path, sizes[key], db.outline)
+				fontString:SetFont(path, sizes[key], outline)
 			end
 		end
 	end
@@ -386,6 +344,11 @@ end
 function ActionBars:OnInit()
 	-- Left over from the earlier whole-button opacity slider.
 	self.db.opacity = nil
+	-- The border used to be on/off (showBorder); on becomes thickness 1, off 0.
+	if self.db.showBorder ~= nil then
+		self.db.borderSize = self.db.showBorder and 1 or 0
+		self.db.showBorder = nil
+	end
 end
 
 function ActionBars:OnLogin()
@@ -422,17 +385,6 @@ local function CreateLabel(parent, text, template)
 	return label
 end
 
-local function CreateDropdown(parent, anchor, labelText, width)
-	local label = CreateLabel(parent, labelText)
-	label:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -16)
-	label:SetWidth(110)
-
-	local dropdown = CreateFrame("DropdownButton", nil, parent, "WowStyle1DropdownTemplate")
-	dropdown:SetPoint("LEFT", label, "RIGHT", 8, 0)
-	dropdown:SetWidth(width)
-	return dropdown, label
-end
-
 -- range = { min, max, steps, format }; format turns the value into the label text.
 local SIZE_RANGE = { 6, 24, 18, "%d" }
 local OPACITY_RANGE = { 0, 100, 20, "%d%%" }
@@ -457,6 +409,7 @@ local function CreateSlider(module, parent, anchor, labelText, key, range)
 			module:Refresh()
 		end
 	end, slider)
+	ns.MakeSliderEditable(slider)
 	return slider, label
 end
 
@@ -476,67 +429,18 @@ function ActionBars:CreatePage(page)
 	end)
 	self.enableCheck = check
 
-	local borderCheck = CreateFrame("CheckButton", nil, page, "UICheckButtonTemplate")
-	borderCheck:SetPoint("TOPLEFT", check, "BOTTOMLEFT", 0, 2)
-	borderCheck.Text:SetFontObject("GameFontHighlight")
-	borderCheck.Text:SetText("Black border (action bars and unit frames)")
-	borderCheck:SetChecked(self.db.showBorder)
-	borderCheck:SetScript("OnClick", function(button)
-		module.db.showBorder = button:GetChecked()
-		module:Refresh()
-		local unitFrames = ns:GetModule("UnitFrames")
-		if unitFrames and unitFrames.db and unitFrames.db.enabled then
-			unitFrames:Apply()
-		end
-	end)
+	local sliderAnchor = CreateFrame("Frame", nil, page)
+	sliderAnchor:SetPoint("TOPLEFT", check, "BOTTOMLEFT", 4, 0)
+	sliderAnchor:SetSize(1, 1)
+	local _, borderLabel = CreateSlider(self, page, sliderAnchor, "Border thickness", "borderSize", { 0, 5, 5, "%d" })
+	local _, opacityLabel = CreateSlider(self, page, borderLabel, "Background", "backgroundOpacity", OPACITY_RANGE)
 
-	local opacityAnchor = CreateFrame("Frame", nil, page)
-	opacityAnchor:SetPoint("TOPLEFT", borderCheck, "BOTTOMLEFT", 4, 0)
-	opacityAnchor:SetSize(1, 1)
-	local _, opacityLabel = CreateSlider(self, page, opacityAnchor, "Background", "backgroundOpacity", OPACITY_RANGE)
-
-	local fontsHeader = CreateLabel(page, "Fonts", "GameFontNormal")
+	local fontsHeader = CreateLabel(page, "Text sizes", "GameFontNormal")
 	fontsHeader:SetPoint("TOPLEFT", opacityLabel, "BOTTOMLEFT", 0, -20)
+	local fontsNote = CreateLabel(page, "The font and outline are on the Fonts page.", "GameFontDisableSmall")
+	fontsNote:SetPoint("TOPLEFT", fontsHeader, "BOTTOMLEFT", 0, -6)
 
-	local fontDropdown, fontLabel = CreateDropdown(page, fontsHeader, "Font", 200)
-	fontDropdown:SetupMenu(function(_, rootDescription)
-		rootDescription:SetScrollMode(300)
-		local function IsSelected(key)
-			return module.db.font == key
-		end
-		local function SetSelected(key)
-			module.db.font = key
-			module:Refresh()
-		end
-		for _, font in ipairs(FONTS) do
-			rootDescription:CreateRadio(font.name, IsSelected, SetSelected, font.key)
-		end
-
-		local media = GetSharedMedia()
-		if media then
-			rootDescription:CreateDivider()
-			rootDescription:CreateTitle("Shared media")
-			for _, name in ipairs(media:List("font")) do
-				rootDescription:CreateRadio(name, IsSelected, SetSelected, name)
-			end
-		end
-	end)
-
-	local outlineDropdown, outlineLabel = CreateDropdown(page, fontLabel, "Outline", 200)
-	outlineDropdown:SetupMenu(function(_, rootDescription)
-		local function IsSelected(key)
-			return module.db.outline == key
-		end
-		local function SetSelected(key)
-			module.db.outline = key
-			module:Refresh()
-		end
-		for _, outline in ipairs(OUTLINES) do
-			rootDescription:CreateRadio(outline.name, IsSelected, SetSelected, outline.key)
-		end
-	end)
-
-	local _, hotkeyLabel = CreateSlider(self, page, outlineLabel, "Keybind size", "hotkeySize", SIZE_RANGE)
+	local _, hotkeyLabel = CreateSlider(self, page, fontsNote, "Keybind size", "hotkeySize", SIZE_RANGE)
 	local _, countLabel = CreateSlider(self, page, hotkeyLabel, "Stack count size", "countSize", SIZE_RANGE)
 	local _, nameLabel = CreateSlider(self, page, countLabel, "Macro name size", "nameSize", SIZE_RANGE)
 
@@ -545,15 +449,16 @@ function ActionBars:CreatePage(page)
 	note:SetPoint("RIGHT", page, "RIGHT", -4, 0)
 	note:SetJustifyV("TOP")
 	note:SetText("Background is how dark the inside of each slot is (0% = see-through). "
-		.. "Background and font settings only apply while the restyle is on. "
+		.. "Background and text settings only apply while the restyle is on. "
 		.. "Changes made in combat are applied when combat ends. "
 		.. "Type |cffffd100/adam barstyle|r to switch the restyle on or off.")
-
-	self.fontDropdown = fontDropdown
 end
 
 function ActionBars:OnPageShown(page)
 	self.enableCheck:SetChecked(self.db.enabled)
-	-- The dropdown's text is only refreshed on generate; the shared media list can also grow after login.
-	self.fontDropdown:GenerateMenu()
+end
+
+-- The Fonts page changed the font or outline.
+function ActionBars:OnFontChanged()
+	self:Refresh()
 end
