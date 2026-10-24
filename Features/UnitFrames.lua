@@ -1,14 +1,16 @@
 local addonName, ns = ...
 
--- Replaces Blizzard's player and target frames with flat ones in the action bar style:
--- one thick health bar (no portrait, no power bar), border shared with the action bars.
--- Player: "% ... number". Target: mirrored, name on the top edge, level bottom left,
--- buffs above.
+-- Replaces Blizzard's player and target frames with portrait frames: a round portrait
+-- in a ring of the unit's colour, with a health bar tucked behind it.
+-- Player: portrait left, name above the bar, "value | %" right, level bottom left.
+-- Target: mirrored, "% | value" left with a combat icon, power bar below, debuffs above,
+-- level under the portrait coloured by difficulty, gold dragon for elites and bosses,
+-- silver for rares. Target of target: a small bar with the name, right of the target.
 --
 -- The frames are secure unit buttons (click to target, right-click for the menu), so
--- showing, hiding, moving and resizing them only happens out of combat. Health values
--- are secret in WoW Forever; they go straight into the bar and the font strings,
--- which accept secrets, and are never compared or calculated with.
+-- showing, hiding, moving and resizing them only happens out of combat. Health and
+-- power values are secret in WoW Forever; they go straight into the bars and the font
+-- strings, which accept secrets, and are never compared or calculated with.
 
 local UnitFrames = ns:RegisterModule("UnitFrames", {
 	title = "Unit Frames",
@@ -16,11 +18,13 @@ local UnitFrames = ns:RegisterModule("UnitFrames", {
 	defaults = {
 		enabled = true,
 		locked = true,
-		width = 220,
-		height = 40,
-		textSize = 13,
-		buffSize = 22,
-		barTexture = "blizzard", -- key in BAR_TEXTURES, or a LibSharedMedia statusbar name
+		width = 220,        -- health bar, including the part tucked behind the portrait
+		barHeight = 20,
+		portraitSize = 50,
+		powerHeight = 6,
+		textSize = 12,
+		debuffSize = 22,
+		barTexture = "melli", -- key in BAR_TEXTURES, or a LibSharedMedia statusbar name
 		positions = {
 			player = nil, -- { point, relativePoint, x, y }; nil = default
 			target = nil,
@@ -42,42 +46,47 @@ local UNITS = {
 		unit = "player",
 		frameName = "AdamAddonPlayerFrame",
 		blizzardFrame = "PlayerFrame",
-		showCombat = true, -- crossed swords on the bottom-left edge while in combat
+		portraitSide = "LEFT",
+		showCombat = true,
 		defaultPosition = { "CENTER", "CENTER", -260, -160 },
 	},
 	target = {
 		unit = "target",
 		frameName = "AdamAddonTargetFrame",
 		blizzardFrame = "TargetFrame",
-		mirrored = true, -- number left, % right
-		showName = true,
-		levelLeft = true,
-		showBuffs = true,
+		portraitSide = "RIGHT",
+		percentFirst = true, -- "52.7% | 29"
+		colorLevel = true,
+		showCombat = true,
+		showPower = true,
+		showDebuffs = true,
+		showClassification = true,
+		placeholderName = "Target",
 		defaultPosition = { "CENTER", "CENTER", 260, -160 },
 	},
-	-- Small, name left and % right, attached to the right of the target frame.
 	-- Blizzard's own target-of-target frame lives inside TargetFrame, so it's already hidden.
 	targettarget = {
 		unit = "targettarget",
 		frameName = "AdamAddonTargetTargetFrame",
 		compact = true,
-		showName = true,
 		placeholderName = "Target of target",
 		anchorTo = "target",
 	},
 }
 local UNIT_ORDER = { "player", "target", "targettarget" } -- target before the frame anchored to it
 
--- Target of target size relative to the main frames, and how often it polls:
+-- Target of target size relative to the main bar, and how often it polls:
 -- unit events don't fire for "targettarget".
-local COMPACT_WIDTH_SCALE = 0.55
-local COMPACT_HEIGHT_SCALE = 0.65
-local COMPACT_GAP = 6
+local COMPACT_WIDTH_SCALE = 0.45
+local COMPACT_HEIGHT_SCALE = 0.8
+local COMPACT_GAP = 4
 local POLL_INTERVAL = 0.25
 
 -- Our own textures are plain grey levels in Media\BarTextures, tinted by the bar colour.
+-- Melli comes from ElvUI.
 local MEDIA = "Interface\\AddOns\\" .. addonName .. "\\Media\\BarTextures\\"
 local BAR_TEXTURES = {
+	{ key = "melli", name = "Melli", path = MEDIA .. "Melli.tga" },
 	{ key = "flat", name = "Flat", path = MEDIA .. "Flat.tga" },
 	{ key = "smooth", name = "Smooth", path = MEDIA .. "Smooth.tga" },
 	{ key = "glass", name = "Glass", path = MEDIA .. "Glass.tga" },
@@ -87,11 +96,24 @@ local BAR_TEXTURES = {
 	{ key = "skills", name = "Blizzard skills", path = "Interface\\PaperDollInfoFrame\\UI-Character-Skills-Bar" },
 	{ key = "targetfill", name = "Blizzard target", path = "Interface\\TargetingFrame\\UI-TargetingFrame-BarFill" },
 }
-local DEFAULT_BAR_TEXTURE = "Interface\\TargetingFrame\\UI-StatusBar"
+local DEFAULT_BAR_TEXTURE = MEDIA .. "Melli.tga"
 local DEFAULT_FONT = "Fonts\\FRIZQT__.TTF"
 local ICON_CROP = 0.08
 local COMBAT_ICON_ATLAS = "UI-HUD-UnitFrame-Player-CombatIcon" -- same art as Blizzard's player frame
-local MAX_BUFFS = 16
+local PORTRAIT_MASK = "Interface\\CharacterFrame\\TempPortraitAlphaMask"
+local MAX_DEBUFFS = 16
+
+-- The dragon art from Blizzard's Camelot target frame (Camelot/TargetFrameUtils.lua).
+-- x, y place the art's top-right corner the way Blizzard does: from its frame's corner,
+-- where the 58 px portrait sits 26 px in and 19 px down. Scaled to our portrait size.
+local BLIZZARD_PORTRAIT_SIZE = 58
+local BLIZZARD_PORTRAIT_INSET_X = 26
+local BLIZZARD_PORTRAIT_INSET_Y = 19
+local CLASSIFICATION_ART = {
+	boss = { atlas = "UI-HUD-UnitFrame-Target-PortraitOn-Boss-Gold-Winged", x = 11, y = -4 },
+	rare = { atlas = "UI-HUD-UnitFrame-Target-PortraitOn-Boss-Rare-Silver-Winged", x = 8, y = -7 },
+	elite = { atlas = "UI-HUD-UnitFrame-Target-PortraitOn-Boss-Gold", x = 0, y = 1 },
+}
 
 local frames = {}           -- [key] = our frame
 local blizzardParents = {}  -- [frame name] = original parent, while Blizzard's frame is hidden
@@ -157,48 +179,119 @@ local function GetBackgroundAlpha()
 	return (settings and settings.backgroundOpacity or 0) / 100
 end
 
+local function GetPowerColor(powerType, powerToken)
+	local color = (powerToken and PowerBarColor[powerToken]) or PowerBarColor[powerType]
+	if color then
+		return color.r, color.g, color.b
+	end
+	return 0, 0.55, 1
+end
+
+-- nil for normal units.
+local function GetClassificationArt(unit)
+	local classification = UnitClassification(unit)
+	if IsSecret(classification) then
+		return nil
+	end
+	if UnitIsBossMob(unit) or classification == "worldboss" then
+		return CLASSIFICATION_ART.boss
+	elseif classification == "rare" or classification == "rareelite" then
+		return CLASSIFICATION_ART.rare
+	elseif classification == "elite" then
+		return CLASSIFICATION_ART.elite
+	end
+	return nil
+end
+
 ---------------------------------------------------------------------------
 -- Updating one frame
 ---------------------------------------------------------------------------
+
+local function GetInterpolation(smooth)
+	return smooth and Enum.StatusBarInterpolation.ExponentialEaseOut
+		or Enum.StatusBarInterpolation.Immediate
+end
+
+local function SetHealthText(frame, text)
+	if frame.HealthText then
+		frame.HealthText:SetText(text)
+	end
+end
 
 -- smooth: glide to the new value (the engine animates it, so secret values work).
 -- Not smooth: jump, used when the frame starts showing a different unit.
 local function UpdateHealth(frame, smooth)
 	local unit = frame.unit
 	local bar = frame.HealthBar
-	local interpolation = smooth and Enum.StatusBarInterpolation.ExponentialEaseOut
-		or Enum.StatusBarInterpolation.Immediate
 
 	if not UnitExists(unit) then
 		-- Only seen while the frames are unlocked for moving.
 		bar:SetMinMaxValues(0, 1)
 		bar:SetValue(1)
-		frame.PercentText:SetText("100%")
-		frame.ValueText:SetText("")
+		SetHealthText(frame, "100%")
 		return
 	end
 
 	if UnitIsDeadOrGhost(unit) then
 		bar:SetMinMaxValues(0, 1)
-		bar:SetValue(0, interpolation)
-		frame.PercentText:SetText("Dead")
-		frame.ValueText:SetText("")
+		bar:SetValue(0, GetInterpolation(smooth))
+		SetHealthText(frame, "Dead")
 		return
 	end
 
 	if not UnitIsConnected(unit) then
 		bar:SetMinMaxValues(0, 1)
 		bar:SetValue(0)
-		frame.PercentText:SetText("Offline")
-		frame.ValueText:SetText("")
+		SetHealthText(frame, "Offline")
 		return
 	end
 
 	-- Secret values: passed through, never compared.
 	bar:SetMinMaxValues(0, UnitHealthMax(unit))
-	bar:SetValue(UnitHealth(unit), interpolation)
-	frame.ValueText:SetText(AbbreviateLargeNumbers(UnitHealth(unit)))
-	frame.PercentText:SetFormattedText("%.0f%%", UnitHealthPercent(unit, true, CurveConstants.ScaleTo100))
+	bar:SetValue(UnitHealth(unit), GetInterpolation(smooth))
+	if frame.HealthText then
+		local value = AbbreviateLargeNumbers(UnitHealth(unit))
+		local percent = UnitHealthPercent(unit, true, CurveConstants.ScaleTo100)
+		if frame.info.percentFirst then
+			frame.HealthText:SetFormattedText("%.1f%% | %s", percent, value)
+		else
+			frame.HealthText:SetFormattedText("%s | %.0f%%", value, percent)
+		end
+	end
+end
+
+local function UpdatePower(frame, smooth)
+	local box = frame.PowerBox
+	if not box then
+		return
+	end
+	local unit = frame.unit
+	local bar = box.Bar
+
+	if not UnitExists(unit) then
+		box:Show()
+		bar:SetMinMaxValues(0, 1)
+		bar:SetValue(1)
+		bar:SetStatusBarColor(GetPowerColor(Enum.PowerType.Mana, "MANA"))
+		frame.PowerText:SetText("")
+		return
+	end
+
+	-- Blizzard hides the power bar of "minus" mobs (critters and the like) too.
+	local classification = UnitClassification(unit)
+	if not IsSecret(classification) and classification == "minus" then
+		box:Hide()
+		return
+	end
+	box:Show()
+
+	local powerType, powerToken = UnitPowerType(unit)
+	local r, g, b = GetPowerColor(powerType, powerToken)
+	bar:SetStatusBarColor(r, g, b)
+	bar:SetMinMaxValues(0, UnitPowerMax(unit, powerType))
+	bar:SetValue(UnitPower(unit, powerType), GetInterpolation(smooth))
+	frame.PowerText:SetFormattedText("%d", UnitPower(unit, powerType))
+	frame.PowerText:SetTextColor(r, g, b)
 end
 
 local function UpdateColor(frame)
@@ -224,51 +317,112 @@ local function UpdateColor(frame)
 	end
 
 	frame.HealthBar:SetStatusBarColor(r, g, b)
+	if frame.Ring then
+		frame.Ring:SetColorTexture(r, g, b, 1)
+	end
 end
 
 local function UpdateName(frame)
-	if not frame.NameText then
-		return
-	end
 	if UnitExists(frame.unit) then
 		frame.NameText:SetText(UnitName(frame.unit))
 	else
-		frame.NameText:SetText(frame.info.placeholderName or "Target")
+		frame.NameText:SetText(frame.info.placeholderName or "")
 	end
 end
 
+-- Player: white. Target: coloured by difficulty when it can be attacked (grey, green,
+-- yellow, orange, red), Blizzard's gold otherwise.
 local function UpdateLevel(frame)
+	local text = frame.LevelText
+	if not text then
+		return
+	end
 	local unit = frame.unit
 	if not UnitExists(unit) then
-		frame.LevelText:SetText("")
+		text:SetText("")
 		return
 	end
 
-	local level = UnitLevel(unit)
+	local level = frame.info.colorLevel and UnitEffectiveLevel(unit) or UnitLevel(unit)
 	if IsSecret(level) then
-		frame.LevelText:SetText(level)
-	elseif level and level > 0 then
-		frame.LevelText:SetText(tostring(level))
-	else
-		frame.LevelText:SetText("??")
+		text:SetText(level)
+		text:SetTextColor(1, 1, 1)
+		return
 	end
+	if not level or level <= 0 then
+		-- Too high to tell.
+		text:SetText("??")
+		text:SetTextColor(1, 0.1, 0.1)
+		return
+	end
+
+	text:SetText(tostring(level))
+	local r, g, b = 1, 1, 1
+	if frame.info.colorLevel then
+		if UnitCanAttack("player", unit) then
+			local difficulty = C_PlayerInfo.GetContentDifficultyCreatureForPlayer(unit)
+			local color = difficulty and not IsSecret(difficulty) and GetDifficultyColor(difficulty)
+			if color then
+				r, g, b = color.r, color.g, color.b
+			end
+		else
+			r, g, b = 1, 0.82, 0
+		end
+	end
+	text:SetTextColor(r, g, b)
+end
+
+local function UpdatePortrait(frame)
+	local portrait = frame.Portrait
+	if not portrait then
+		return
+	end
+	if UnitExists(frame.unit) then
+		SetPortraitTexture(portrait, frame.unit)
+	else
+		portrait:SetColorTexture(0.1, 0.1, 0.1, 1)
+	end
+end
+
+local function UpdateClassification(frame)
+	local dragon = frame.Dragon
+	if not dragon then
+		return
+	end
+	local art = UnitExists(frame.unit) and GetClassificationArt(frame.unit)
+	local info = art and C_Texture.GetAtlasInfo(art.atlas)
+	if not info then
+		dragon:Hide()
+		return
+	end
+
+	local scale = UnitFrames.db.portraitSize / BLIZZARD_PORTRAIT_SIZE
+	dragon:SetAtlas(art.atlas)
+	dragon:SetSize(info.width * scale, info.height * scale)
+	dragon:ClearAllPoints()
+	dragon:SetPoint("TOPRIGHT", frame.PortraitFrame, "TOPRIGHT",
+		(art.x + BLIZZARD_PORTRAIT_INSET_X) * scale, (art.y + BLIZZARD_PORTRAIT_INSET_Y) * scale)
+	dragon:Show()
 end
 
 local function UpdateCombat(frame)
 	if frame.CombatIcon then
-		frame.CombatIcon:SetShown(UnitAffectingCombat(frame.unit))
+		frame.CombatIcon:SetShown(UnitExists(frame.unit) and UnitAffectingCombat(frame.unit))
 	end
 end
 
 -- smooth is only passed by the target-of-target poll; a new unit always snaps.
 local function UpdateAll(frame, smooth)
 	UpdateHealth(frame, smooth)
+	UpdatePower(frame, smooth)
 	UpdateColor(frame)
 	UpdateName(frame)
 	UpdateLevel(frame)
+	UpdatePortrait(frame)
+	UpdateClassification(frame)
 	UpdateCombat(frame)
-	if frame.Buffs then
-		frame.Buffs:UpdateAllAuras()
+	if frame.Debuffs then
+		frame.Debuffs:UpdateAllAuras()
 	end
 end
 
@@ -299,8 +453,70 @@ local function CreateText(parent, justify)
 	return text
 end
 
--- Called once per buff button by Blizzard's aura container.
-local function InitializeBuffButton(button)
+-- A status bar on a background, inside the black border shared with the action bars.
+local function CreateBox(frame)
+	local box = CreateFrame("Frame", nil, frame)
+	box.Background = box:CreateTexture(nil, "BACKGROUND")
+	box.Background:SetAllPoints()
+
+	box.Bar = CreateFrame("StatusBar", nil, box)
+	box.Bar:SetStatusBarTexture(GetBarTexturePath(UnitFrames.db.barTexture))
+
+	local borderFrame = CreateFrame("Frame", nil, box)
+	borderFrame:SetAllPoints()
+	borderFrame:SetFrameLevel(box.Bar:GetFrameLevel() + 1)
+	box.Border = {
+		TOP = CreateLine(borderFrame),
+		BOTTOM = CreateLine(borderFrame),
+		LEFT = CreateLine(borderFrame),
+		RIGHT = CreateLine(borderFrame),
+	}
+
+	table.insert(frame.Boxes, box)
+	return box
+end
+
+local function LayoutBox(box, border)
+	box.Background:SetColorTexture(0, 0, 0, GetBackgroundAlpha())
+
+	local lines = box.Border
+	lines.TOP:ClearAllPoints()
+	lines.TOP:SetPoint("TOPLEFT")
+	lines.TOP:SetPoint("TOPRIGHT")
+	lines.TOP:SetHeight(border)
+	lines.BOTTOM:ClearAllPoints()
+	lines.BOTTOM:SetPoint("BOTTOMLEFT")
+	lines.BOTTOM:SetPoint("BOTTOMRIGHT")
+	lines.BOTTOM:SetHeight(border)
+	lines.LEFT:ClearAllPoints()
+	lines.LEFT:SetPoint("TOPLEFT")
+	lines.LEFT:SetPoint("BOTTOMLEFT")
+	lines.LEFT:SetWidth(border)
+	lines.RIGHT:ClearAllPoints()
+	lines.RIGHT:SetPoint("TOPRIGHT")
+	lines.RIGHT:SetPoint("BOTTOMRIGHT")
+	lines.RIGHT:SetWidth(border)
+	for _, line in pairs(lines) do
+		line:SetShown(border > 0)
+	end
+
+	box.Bar:ClearAllPoints()
+	box.Bar:SetPoint("TOPLEFT", border, -border)
+	box.Bar:SetPoint("BOTTOMRIGHT", -border, border)
+end
+
+-- A texture cut to a circle.
+local function CreateCircle(parent, layer, subLevel)
+	local texture = parent:CreateTexture(nil, layer, nil, subLevel)
+	local mask = parent:CreateMaskTexture()
+	mask:SetTexture(PORTRAIT_MASK, "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+	mask:SetAllPoints(texture)
+	texture:AddMaskTexture(mask)
+	return texture
+end
+
+-- Called once per debuff button by Blizzard's aura container.
+local function InitializeAuraButton(button)
 	local background = button:CreateTexture(nil, "BACKGROUND")
 	background:SetAllPoints()
 	background:SetColorTexture(0, 0, 0, 1)
@@ -311,10 +527,12 @@ local function InitializeBuffButton(button)
 	icon:SetTexCoord(ICON_CROP, 1 - ICON_CROP, ICON_CROP, 1 - ICON_CROP)
 	button:SetIcon(icon)
 
+	-- The countdown numbers are the time left, as on the screenshots.
 	local cooldown = CreateFrame("Cooldown", nil, button, "CooldownFrameTemplate")
 	cooldown:ClearAllPoints()
 	cooldown:SetAllPoints(icon)
 	cooldown:SetDrawEdge(false)
+	cooldown:SetHideCountdownNumbers(false)
 	button:SetDurationCooldown(cooldown)
 
 	-- Above the cooldown swipe.
@@ -327,16 +545,16 @@ local function InitializeBuffButton(button)
 	button:SetApplicationCount(count)
 end
 
-local function CreateBuffs(frame)
-	local buffs = CreateFrame("AuraContainer", nil, frame, "CustomAuraContainerTemplate")
-	buffs:AddAuraGroup("buffs", "HELPFUL", {
-		maxFrameCount = MAX_BUFFS,
-		initializeFrame = InitializeBuffButton,
+local function CreateDebuffs(frame)
+	local debuffs = CreateFrame("AuraContainer", nil, frame, "CustomAuraContainerTemplate")
+	debuffs:AddAuraGroup("debuffs", "HARMFUL", {
+		maxFrameCount = MAX_DEBUFFS,
+		initializeFrame = InitializeAuraButton,
 	})
-	buffs:SetFlowLayoutAnchorPoint("BOTTOMLEFT")
-	buffs:SetFlowLayoutGrowthDirection(AnchorUtil.FlowDirection.Right, AnchorUtil.FlowDirection.Up)
-	buffs:SetUnit(frame.unit)
-	return buffs
+	debuffs:SetFlowLayoutAnchorPoint("BOTTOMLEFT")
+	debuffs:SetFlowLayoutGrowthDirection(AnchorUtil.FlowDirection.Right, AnchorUtil.FlowDirection.Up)
+	debuffs:SetUnit(frame.unit)
+	return debuffs
 end
 
 local function SavePosition(frame)
@@ -351,6 +569,7 @@ local function BuildFrame(key)
 	frame.key = key
 	frame.unit = info.unit
 	frame.info = info
+	frame.Boxes = {}
 	frame:SetAttribute("unit", info.unit)
 	frame:SetAttribute("*type1", "target")
 	frame:SetAttribute("*type2", "togglemenu")
@@ -385,32 +604,25 @@ local function BuildFrame(key)
 	end
 	frame:Hide()
 
-	frame.Background = frame:CreateTexture(nil, "BACKGROUND")
-	frame.Background:SetAllPoints()
+	local baseLevel = frame:GetFrameLevel()
 
-	frame.HealthBar = CreateFrame("StatusBar", nil, frame)
-	frame.HealthBar:SetStatusBarTexture(GetBarTexturePath(UnitFrames.db.barTexture))
+	frame.HealthBox = CreateBox(frame)
+	frame.HealthBar = frame.HealthBox.Bar
+	if info.showPower then
+		frame.PowerBox = CreateBox(frame)
+	end
 
-	-- Border and texts sit on a layer above the health bar.
+	-- Texts sit on a layer above the bars; the portrait above that, its level text on top.
 	frame.Overlay = CreateFrame("Frame", nil, frame)
 	frame.Overlay:SetAllPoints()
-	frame.Overlay:SetFrameLevel(frame.HealthBar:GetFrameLevel() + 2)
+	frame.Overlay:SetFrameLevel(baseLevel + 5)
 
-	frame.Border = {
-		TOP = CreateLine(frame.Overlay),
-		BOTTOM = CreateLine(frame.Overlay),
-		LEFT = CreateLine(frame.Overlay),
-		RIGHT = CreateLine(frame.Overlay),
-	}
-
-	-- Player: "%" left, number right. Target: mirrored.
-	local percentSide = info.mirrored and "RIGHT" or "LEFT"
-	local valueSide = percentSide == "LEFT" and "RIGHT" or "LEFT"
-	frame.PercentText = CreateText(frame.Overlay, percentSide)
-	frame.ValueText = CreateText(frame.Overlay, valueSide)
-	frame.LevelText = CreateText(frame.Overlay, "RIGHT")
-	if info.showName then
-		frame.NameText = CreateText(frame.Overlay, "LEFT")
+	frame.NameText = CreateText(frame.Overlay, info.portraitSide == "RIGHT" and "RIGHT" or "LEFT")
+	if not info.compact then
+		frame.HealthText = CreateText(frame.Overlay, info.percentFirst and "LEFT" or "RIGHT")
+	end
+	if info.showPower then
+		frame.PowerText = CreateText(frame.Overlay, "CENTER")
 	end
 	if info.showCombat then
 		frame.CombatIcon = frame.Overlay:CreateTexture(nil, "OVERLAY")
@@ -418,125 +630,155 @@ local function BuildFrame(key)
 		frame.CombatIcon:Hide()
 	end
 
-	if info.showBuffs then
-		frame.Buffs = CreateBuffs(frame)
+	if info.portraitSide then
+		local portraitFrame = CreateFrame("Frame", nil, frame)
+		portraitFrame:SetFrameLevel(baseLevel + 7)
+		frame.PortraitFrame = portraitFrame
+		frame.RingEdge = CreateCircle(portraitFrame, "BACKGROUND", 0)
+		frame.RingEdge:SetColorTexture(0, 0, 0, 1)
+		frame.Ring = CreateCircle(portraitFrame, "BACKGROUND", 1)
+		frame.Portrait = CreateCircle(portraitFrame, "ARTWORK", 0)
+		if info.showClassification then
+			frame.Dragon = portraitFrame:CreateTexture(nil, "OVERLAY")
+			frame.Dragon:Hide()
+		end
+
+		local levelLayer = CreateFrame("Frame", nil, frame)
+		levelLayer:SetAllPoints(portraitFrame)
+		levelLayer:SetFrameLevel(baseLevel + 9)
+		frame.LevelText = CreateText(levelLayer, "CENTER")
+	end
+
+	if info.showDebuffs then
+		frame.Debuffs = CreateDebuffs(frame)
 	end
 
 	frames[key] = frame
 	return frame
 end
 
+local function LayoutCompact(frame, border, fontPath, outline, smallSize)
+	local db = UnitFrames.db
+	frame:SetSize(math.floor(db.width * COMPACT_WIDTH_SCALE + 0.5),
+		math.max(math.floor(db.barHeight * COMPACT_HEIGHT_SCALE + 0.5), 8))
+
+	local box = frame.HealthBox
+	box:ClearAllPoints()
+	box:SetAllPoints()
+	LayoutBox(box, border)
+
+	frame.NameText:ClearAllPoints()
+	frame.NameText:SetPoint("LEFT", box.Bar, "LEFT", 3, 0)
+	frame.NameText:SetPoint("RIGHT", box.Bar, "RIGHT", -3, 0)
+	frame.NameText:SetFont(fontPath, smallSize, outline)
+end
+
 local function LayoutFrame(frame)
 	local db = UnitFrames.db
+	local info = frame.info
 	local border = GetBorderSize(frame)
-	local compact = frame.info.compact
-	local width, height = db.width, db.height
-	if compact then
-		width = math.floor(width * COMPACT_WIDTH_SCALE + 0.5)
-		height = math.floor(height * COMPACT_HEIGHT_SCALE + 0.5)
-	end
-	frame:SetSize(width, height)
-	frame.Background:SetColorTexture(0, 0, 0, GetBackgroundAlpha())
-
-	local lines = frame.Border
-	lines.TOP:ClearAllPoints()
-	lines.TOP:SetPoint("TOPLEFT")
-	lines.TOP:SetPoint("TOPRIGHT")
-	lines.TOP:SetHeight(border)
-	lines.BOTTOM:ClearAllPoints()
-	lines.BOTTOM:SetPoint("BOTTOMLEFT")
-	lines.BOTTOM:SetPoint("BOTTOMRIGHT")
-	lines.BOTTOM:SetHeight(border)
-	lines.LEFT:ClearAllPoints()
-	lines.LEFT:SetPoint("TOPLEFT")
-	lines.LEFT:SetPoint("BOTTOMLEFT")
-	lines.LEFT:SetWidth(border)
-	lines.RIGHT:ClearAllPoints()
-	lines.RIGHT:SetPoint("TOPRIGHT")
-	lines.RIGHT:SetPoint("BOTTOMRIGHT")
-	lines.RIGHT:SetWidth(border)
-	for _, line in pairs(lines) do
-		line:SetShown(border > 0)
-	end
-
-	local bar = frame.HealthBar
-	bar:ClearAllPoints()
-	bar:SetPoint("TOPLEFT", border, -border)
-	bar:SetPoint("BOTTOMRIGHT", -border, border)
-
 	local fontPath, outline = GetFont()
 	local textSize = db.textSize
 	local smallSize = math.max(textSize - 2, 6)
 
-	frame.PercentText:ClearAllPoints()
-	frame.ValueText:ClearAllPoints()
-	if frame.info.mirrored then
-		frame.ValueText:SetPoint("LEFT", bar, "LEFT", 4, 0)
-		frame.PercentText:SetPoint("RIGHT", bar, "RIGHT", -4, 0)
+	if info.compact then
+		LayoutCompact(frame, border, fontPath, outline, smallSize)
 	else
-		frame.PercentText:SetPoint("LEFT", bar, "LEFT", 4, 0)
-		frame.ValueText:SetPoint("RIGHT", bar, "RIGHT", -4, 0)
-	end
-	frame.PercentText:SetFont(fontPath, textSize, outline)
-	frame.ValueText:SetFont(fontPath, textSize, outline)
+		local size = db.portraitSize
+		local half = size / 2
+		local mirrored = info.portraitSide == "RIGHT"
+		local side = info.portraitSide
+		local otherSide = mirrored and "LEFT" or "RIGHT"
+		local visibleWidth = db.width - half -- the bar outside the portrait
+		frame:SetSize(half + db.width, size)
 
-	-- Level sits on the bottom edge (right for the player, left for the target);
-	-- the target's name sits on the top edge, left.
-	frame.LevelText:ClearAllPoints()
-	if frame.info.levelLeft then
-		frame.LevelText:SetPoint("LEFT", frame, "BOTTOMLEFT", 6, 0)
-	else
-		frame.LevelText:SetPoint("RIGHT", frame, "BOTTOMRIGHT", -6, 0)
-	end
-	frame.LevelText:SetFont(fontPath, smallSize, outline)
+		-- Portrait: black edge, coloured ring, picture.
+		local portraitFrame = frame.PortraitFrame
+		portraitFrame:ClearAllPoints()
+		portraitFrame:SetPoint(side, frame, side, 0, 0)
+		portraitFrame:SetSize(size, size)
+		local ringWidth = math.max(2, math.floor(size * 0.06 + 0.5))
+		frame.RingEdge:ClearAllPoints()
+		frame.RingEdge:SetAllPoints(portraitFrame)
+		frame.RingEdge:SetShown(border > 0)
+		frame.Ring:ClearAllPoints()
+		frame.Ring:SetPoint("TOPLEFT", border, -border)
+		frame.Ring:SetPoint("BOTTOMRIGHT", -border, border)
+		local inset = border + ringWidth
+		frame.Portrait:ClearAllPoints()
+		frame.Portrait:SetPoint("TOPLEFT", inset, -inset)
+		frame.Portrait:SetPoint("BOTTOMRIGHT", -inset, inset)
 
-	if frame.CombatIcon then
-		local iconSize = smallSize + 6
-		frame.CombatIcon:SetSize(iconSize, iconSize)
-		frame.CombatIcon:ClearAllPoints()
-		frame.CombatIcon:SetPoint("LEFT", frame, "BOTTOMLEFT", 4, 0)
-	end
+		-- Health bar from the portrait's centre to the far end, centred on the portrait.
+		local box = frame.HealthBox
+		box:ClearAllPoints()
+		box:SetPoint(side, portraitFrame, "CENTER", 0, 0)
+		box:SetPoint(otherSide, frame, otherSide, 0, 0)
+		box:SetHeight(db.barHeight)
+		LayoutBox(box, border)
 
-	if frame.NameText and not compact then
+		local direction = mirrored and -1 or 1 -- away from the portrait
+		frame.HealthText:ClearAllPoints()
+		frame.HealthText:SetPoint(otherSide, box.Bar, otherSide, -4 * direction, 0)
+		frame.HealthText:SetFont(fontPath, textSize, outline)
+
+		if frame.CombatIcon then
+			-- Next to the health text, on the side facing the portrait.
+			local iconSize = smallSize + 4
+			frame.CombatIcon:SetSize(iconSize, iconSize)
+			frame.CombatIcon:ClearAllPoints()
+			frame.CombatIcon:SetPoint(otherSide, frame.HealthText, side, -2 * direction, 0)
+		end
+
+		-- Name above the bar, starting next to the portrait.
 		frame.NameText:ClearAllPoints()
-		frame.NameText:SetPoint("LEFT", frame, "TOPLEFT", 6, 0)
-		frame.NameText:SetWidth(width * 0.7)
-		frame.NameText:SetFont(fontPath, smallSize, outline)
-	end
+		frame.NameText:SetPoint("BOTTOM" .. side, box, "TOP" .. side, (half + 4) * direction, 2)
+		frame.NameText:SetWidth(visibleWidth * (info.showDebuffs and 0.55 or 0.9))
+		frame.NameText:SetFont(fontPath, textSize, outline)
 
-	-- Compact: name inside the bar on the left, % on the right, nothing else.
-	frame.ValueText:SetShown(not compact)
-	frame.LevelText:SetShown(not compact)
-	if compact then
-		frame.PercentText:ClearAllPoints()
-		frame.PercentText:SetPoint("RIGHT", bar, "RIGHT", -3, 0)
-		frame.PercentText:SetFont(fontPath, smallSize, outline)
-		frame.NameText:ClearAllPoints()
-		frame.NameText:SetPoint("LEFT", bar, "LEFT", 3, 0)
-		frame.NameText:SetPoint("RIGHT", frame.PercentText, "LEFT", -4, 0)
-		frame.NameText:SetFont(fontPath, smallSize, outline)
-	end
+		-- Level on the portrait's bottom edge: the player's bottom left, the target's centred.
+		frame.LevelText:ClearAllPoints()
+		if mirrored then
+			frame.LevelText:SetPoint("CENTER", portraitFrame, "BOTTOM", 0, size * 0.08)
+		else
+			frame.LevelText:SetPoint("CENTER", portraitFrame, "BOTTOMLEFT", size * 0.15, size * 0.15)
+		end
+		frame.LevelText:SetFont(fontPath, textSize + 1, outline)
 
-	if frame.Buffs then
-		frame.Buffs:ClearAllPoints()
-		-- Clear of the name on the top edge.
-		local nameClearance = frame.NameText and math.ceil(smallSize / 2) or 0
-		frame.Buffs:SetPoint("BOTTOMLEFT", frame, "TOPLEFT", 0, 4 + nameClearance)
-		frame.Buffs:SetFlowLayoutMaximumLineSize(width)
-		frame.Buffs:SetAuraGroupLayout("buffs", {
-			elementWidth = db.buffSize,
-			elementHeight = db.buffSize,
-			elementSpacing = 2,
-			lineSpacing = 2,
-		})
+		if frame.PowerBox then
+			local powerBox = frame.PowerBox
+			powerBox:ClearAllPoints()
+			powerBox:SetPoint("TOPLEFT", box, "BOTTOMLEFT", 0, -1)
+			powerBox:SetPoint("TOPRIGHT", box, "BOTTOMRIGHT", 0, -1)
+			powerBox:SetHeight(db.powerHeight + 2 * border)
+			LayoutBox(powerBox, border)
+			-- Centred on the part outside the portrait.
+			frame.PowerText:ClearAllPoints()
+			frame.PowerText:SetPoint("CENTER", powerBox, "CENTER", size / 4 * direction, 0)
+			frame.PowerText:SetFont(fontPath, smallSize, outline)
+		end
+
+		if frame.Debuffs then
+			-- Above the bar at the far end, leaving room for the name next to the portrait.
+			frame.Debuffs:ClearAllPoints()
+			frame.Debuffs:SetPoint("BOTTOM" .. otherSide, box, "TOP" .. otherSide, 0, 3)
+			frame.Debuffs:SetFlowLayoutMaximumLineSize(visibleWidth * 0.45)
+			frame.Debuffs:SetAuraGroupLayout("debuffs", {
+				elementWidth = db.debuffSize,
+				elementHeight = db.debuffSize,
+				elementSpacing = 2,
+				lineSpacing = 2,
+			})
+		end
 	end
 
 	frame:ClearAllPoints()
-	local anchorFrame = frame.info.anchorTo and frames[frame.info.anchorTo]
+	local anchorFrame = info.anchorTo and frames[info.anchorTo]
 	if anchorFrame then
-		frame:SetPoint("BOTTOMLEFT", anchorFrame, "BOTTOMRIGHT", COMPACT_GAP, 0)
+		-- Right of the target's portrait, level with its health bar.
+		frame:SetPoint("LEFT", anchorFrame, "RIGHT", COMPACT_GAP, 0)
 	else
-		local position = db.positions[frame.key] or frame.info.defaultPosition
+		local position = db.positions[frame.key] or info.defaultPosition
 		frame:SetPoint(position[1], UIParent, position[2], position[3], position[4])
 	end
 end
@@ -663,13 +905,16 @@ function UnitFrames:SetEnabled(enabled)
 	end
 end
 
--- The health bar isn't protected, so this works in combat too.
+-- The bars aren't protected, so this works in combat too.
 function UnitFrames:SetBarTexture(key)
 	self.db.barTexture = key
 	local path = GetBarTexturePath(key)
 	for _, frame in pairs(frames) do
-		frame.HealthBar:SetStatusBarTexture(path)
+		for _, box in ipairs(frame.Boxes) do
+			box.Bar:SetStatusBarTexture(path)
+		end
 		UpdateColor(frame)
+		UpdatePower(frame)
 	end
 end
 
@@ -688,6 +933,16 @@ end
 -- Events
 ---------------------------------------------------------------------------
 
+-- Layout 2 (portraits) switched to the Melli texture and replaced two settings.
+function UnitFrames:OnInit()
+	if (self.db.layoutVersion or 1) < 2 then
+		self.db.barTexture = "melli"
+		self.db.height = nil
+		self.db.buffSize = nil
+		self.db.layoutVersion = 2
+	end
+end
+
 function UnitFrames:OnLogin()
 	self:Apply()
 end
@@ -696,6 +951,12 @@ function UnitFrames:OnUnitHealth(event, unit)
 	ForUnit(unit, function(frame)
 		UpdateHealth(frame, true)
 		UpdateColor(frame)
+	end)
+end
+
+function UnitFrames:OnUnitPower(event, unit)
+	ForUnit(unit, function(frame)
+		UpdatePower(frame, true)
 	end)
 end
 
@@ -709,6 +970,22 @@ end
 
 function UnitFrames:OnUnitFaction(event, unit)
 	ForUnit(unit, UpdateColor)
+end
+
+function UnitFrames:OnUnitPortrait(event, unit)
+	ForUnit(unit, UpdatePortrait)
+end
+
+function UnitFrames:OnUnitClassification(event, unit)
+	ForUnit(unit, function(frame)
+		UpdateClassification(frame)
+		UpdatePower(frame)
+	end)
+end
+
+-- UNIT_FLAGS fires when a unit enters or leaves combat.
+function UnitFrames:OnUnitFlags(event, unit)
+	ForUnit(unit, UpdateCombat)
 end
 
 function UnitFrames:OnTargetChanged()
@@ -749,12 +1026,19 @@ end
 UnitFrames:RegisterEvent("UNIT_HEALTH", "OnUnitHealth")
 UnitFrames:RegisterEvent("UNIT_MAXHEALTH", "OnUnitHealth")
 UnitFrames:RegisterEvent("UNIT_CONNECTION", "OnUnitHealth")
+UnitFrames:RegisterEvent("UNIT_POWER_UPDATE", "OnUnitPower")
+UnitFrames:RegisterEvent("UNIT_MAXPOWER", "OnUnitPower")
+UnitFrames:RegisterEvent("UNIT_DISPLAYPOWER", "OnUnitPower")
 UnitFrames:RegisterEvent("UNIT_LEVEL", "OnUnitLevel")
 UnitFrames:RegisterEvent("PLAYER_LEVEL_UP", function(module)
 	module:OnUnitLevel(nil, "player")
 end)
 UnitFrames:RegisterEvent("UNIT_NAME_UPDATE", "OnUnitName")
 UnitFrames:RegisterEvent("UNIT_FACTION", "OnUnitFaction")
+UnitFrames:RegisterEvent("UNIT_PORTRAIT_UPDATE", "OnUnitPortrait")
+UnitFrames:RegisterEvent("UNIT_MODEL_CHANGED", "OnUnitPortrait")
+UnitFrames:RegisterEvent("UNIT_CLASSIFICATION_CHANGED", "OnUnitClassification")
+UnitFrames:RegisterEvent("UNIT_FLAGS", "OnUnitFlags")
 UnitFrames:RegisterEvent("PLAYER_TARGET_CHANGED", "OnTargetChanged")
 UnitFrames:RegisterEvent("UNIT_TARGET", "OnUnitTarget")
 UnitFrames:RegisterEvent("PLAYER_REGEN_ENABLED", "OnCombatEnded")
@@ -788,7 +1072,7 @@ end
 -- range = { min, max, steps }
 local function CreateSlider(module, parent, anchor, labelText, key, range)
 	local label = CreateLabel(parent, labelText)
-	label:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -18)
+	label:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -12)
 	label:SetWidth(110)
 
 	local slider = CreateFrame("Frame", nil, parent, "MinimalSliderWithSteppersTemplate")
@@ -815,6 +1099,14 @@ function UnitFrames:CreatePage(page)
 	local title = CreateLabel(page, "Unit Frames", "GameFontNormalLarge")
 	title:SetPoint("TOPLEFT", 4, -4)
 
+	local reset = CreateFrame("Button", nil, page, "UIPanelButtonTemplate")
+	reset:SetPoint("TOPRIGHT", page, "TOPRIGHT", -4, -2)
+	reset:SetSize(130, 22)
+	reset:SetText("Reset positions")
+	reset:SetScript("OnClick", function()
+		module:ResetPositions()
+	end)
+
 	local enableCheck = CreateCheck(page, "Use custom player and target frames", self.db.enabled, function(checked)
 		module:SetEnabled(checked)
 	end)
@@ -831,13 +1123,15 @@ function UnitFrames:CreatePage(page)
 	sliderAnchor:SetPoint("TOPLEFT", lockCheck, "BOTTOMLEFT", 4, 0)
 	sliderAnchor:SetSize(1, 1)
 
-	local _, widthLabel = CreateSlider(self, page, sliderAnchor, "Width", "width", { 120, 400, 28 })
-	local _, heightLabel = CreateSlider(self, page, widthLabel, "Height", "height", { 20, 80, 30 })
-	local _, textLabel = CreateSlider(self, page, heightLabel, "Text size", "textSize", { 8, 24, 16 })
-	local _, buffLabel = CreateSlider(self, page, textLabel, "Buff size", "buffSize", { 12, 40, 14 })
+	local _, widthLabel = CreateSlider(self, page, sliderAnchor, "Bar width", "width", { 120, 400, 28 })
+	local _, heightLabel = CreateSlider(self, page, widthLabel, "Bar height", "barHeight", { 10, 50, 40 })
+	local _, portraitLabel = CreateSlider(self, page, heightLabel, "Portrait size", "portraitSize", { 30, 90, 60 })
+	local _, powerLabel = CreateSlider(self, page, portraitLabel, "Power bar height", "powerHeight", { 2, 16, 14 })
+	local _, textLabel = CreateSlider(self, page, powerLabel, "Text size", "textSize", { 8, 24, 16 })
+	local _, debuffLabel = CreateSlider(self, page, textLabel, "Debuff size", "debuffSize", { 12, 40, 14 })
 
 	local textureLabel = CreateLabel(page, "Bar texture")
-	textureLabel:SetPoint("TOPLEFT", buffLabel, "BOTTOMLEFT", 0, -18)
+	textureLabel:SetPoint("TOPLEFT", debuffLabel, "BOTTOMLEFT", 0, -14)
 	textureLabel:SetWidth(110)
 
 	local textureDropdown = CreateFrame("DropdownButton", nil, page, "WowStyle1DropdownTemplate")
@@ -866,16 +1160,8 @@ function UnitFrames:CreatePage(page)
 	end)
 	self.textureDropdown = textureDropdown
 
-	local reset = CreateFrame("Button", nil, page, "UIPanelButtonTemplate")
-	reset:SetPoint("TOPLEFT", textureLabel, "BOTTOMLEFT", 0, -18)
-	reset:SetSize(140, 22)
-	reset:SetText("Reset positions")
-	reset:SetScript("OnClick", function()
-		module:ResetPositions()
-	end)
-
 	local note = CreateLabel(page, "", "GameFontDisableSmall")
-	note:SetPoint("TOPLEFT", reset, "BOTTOMLEFT", 0, -12)
+	note:SetPoint("TOPLEFT", textureLabel, "BOTTOMLEFT", 0, -16)
 	note:SetPoint("RIGHT", page, "RIGHT", -4, 0)
 	note:SetJustifyV("TOP")
 	note:SetText("Border, font and background follow the Action Bars settings. "
