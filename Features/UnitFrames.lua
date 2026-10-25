@@ -945,10 +945,12 @@ end
 
 -- Called once per buff or debuff button by Blizzard's aura container. Its buttons have no
 -- size of their own (the layout's element size only spaces them), so it's set here.
--- texts collects its countdown and stack count font strings.
-local function InitializeAuraButton(button, size, textSize, texts)
+-- texts collects its countdown and stack count font strings; cooldowns (optional) its
+-- cooldown frame, for callers that switch the swipe on and off.
+local function InitializeAuraButton(button, size, textSize, texts, cooldowns)
 	button:SetSize(size, size)
-	local edge = math.max(UnitFrames.db.borderSize, 1)
+	-- Border thickness in whole screen pixels, as on the other borders (at least 1).
+	local edge = PixelUtil.GetNearestPixelSize(math.max(UnitFrames.db.borderSize, 1), button:GetEffectiveScale(), 1)
 
 	-- Border: black, and on debuffs coloured by dispel type over it (red: none, blue:
 	-- magic, green: poison, purple: curse, ...). The container colours that texture
@@ -978,6 +980,9 @@ local function InitializeAuraButton(button, size, textSize, texts)
 	cooldown:SetDrawEdge(false)
 	cooldown:SetHideCountdownNumbers(false)
 	button:SetDurationCooldown(cooldown)
+	if cooldowns then
+		table.insert(cooldowns, cooldown)
+	end
 
 	-- Above the cooldown swipe.
 	local textLayer = CreateFrame("Frame", nil, button)
@@ -1048,6 +1053,12 @@ local function ResizeAuraButtons(auras, size)
 		end
 	end)
 end
+
+-- Shared with PlayerAuras, so the player's buffs and debuffs look the same as the
+-- target's (all in an aura group called "auras").
+ns.InitializeAuraButton = InitializeAuraButton
+ns.SetAuraTextSize = SetAuraTextSize
+ns.ResizeAuraButtons = ResizeAuraButtons
 
 -- Rows are as wide as the health bar outside the portrait, from its far (left) end.
 -- Above: clear of the name on the top border. Below: under the cast bar's spot (it's

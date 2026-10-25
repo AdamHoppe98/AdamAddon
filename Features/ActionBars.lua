@@ -2,7 +2,7 @@ local addonName, ns = ...
 
 -- Restyles Blizzard's action buttons: square icons, a 2 px black border instead of the
 -- round frame art, transparent slot background, and the addon's font (the Fonts page)
--- for the button texts.
+-- for the button texts. Optionally rounded corners (mask images in Media\Masks).
 -- Everything is undone when the feature is switched off on its page.
 --
 -- The buttons are secure, so changes are only made out of combat. A change asked for
@@ -14,6 +14,8 @@ local ActionBars = ns:RegisterModule("ActionBars", {
 	defaults = {
 		enabled = true,
 		borderSize = 1,     -- black border on the buttons, as on the unit frames; 0 = none
+		rounded = false,    -- rounded corners (icon, border, highlights, cooldown swipe)
+		roundness = 4,      -- 1 (slightly) .. 8 (circle); which Media\Masks\Rounded<n>.tga
 		backgroundOpacity = 0, -- percent; black square fill behind the icon
 		hotkeySize = 12,
 		countSize = 14,
@@ -50,6 +52,15 @@ local ICON_CROP = 0.08
 
 -- Cooldown swipes are inset 2-3 px for the round art; stretch them out to the border.
 local COOLDOWNS = { "cooldown", "chargeCooldown", "lossOfControlCooldown" }
+
+-- Rounded corners: white rounded squares whose alpha is the shape, used as masks and as
+-- the cooldown swipe. Rounded<n>.tga has a corner radius of n/16 of the button (8 = circle).
+local MASK_PATH = "Interface\\AddOns\\" .. addonName .. "\\Media\\Masks\\Rounded%d.tga"
+local MAX_ROUNDNESS = 8
+-- Solid white: as the swipe texture it gives the normal flat swipe back (the swipe needs
+-- a texture; nil is refused).
+local SQUARE_SWIPE = "Interface\\AddOns\\" .. addonName .. "\\Media\\Masks\\Square.tga"
+local SWIPE_COLOR = { 0, 0, 0, 0.64 } -- CooldownFrameTemplate's swipe colour
 
 -- Per-button state lives here, not on Blizzard's frames, to keep their tables untouched.
 local styled = {}   -- [button] = { saved originals and our own textures }
@@ -124,13 +135,15 @@ local function GetBorderSize(button)
 	return PixelUtil.GetNearestPixelSize(size, button:GetEffectiveScale(), 1)
 end
 
+-- The lines snap to whole screen pixels, like Blizzard's icon does. Unsnapped, a 1 px
+-- line on a button whose edges fall between pixels (small bars, odd UI scales) is drawn
+-- half over two pixels, and pokes a pixel out past the icon.
 local function CreateBorder(button)
 	local border = {}
 	for _, side in ipairs({ "TOP", "BOTTOM", "LEFT", "RIGHT" }) do
 		local line = button:CreateTexture(nil, "OVERLAY", nil, 7)
 		line:SetColorTexture(0, 0, 0, 1)
-		line:SetSnapToPixelGrid(false)
-		line:SetTexelSnappingBias(0)
+		line:SetSnapToPixelGrid(true)
 		border[side] = line
 	end
 	return border
@@ -173,6 +186,74 @@ local STATE_COLORS = {
 	CheckedTexture = { 1, 0.82, 0, 0.35 },
 }
 
+-- Adds or removes a mask, remembering which is on so it's never added twice.
+local function SetMasked(state, texture, mask, masked)
+	local current = state.masked[texture]
+	if current and (not masked or current ~= mask) then
+		texture:RemoveMaskTexture(current)
+		state.masked[texture] = nil
+	end
+	if masked and not state.masked[texture] then
+		texture:AddMaskTexture(mask)
+		state.masked[texture] = mask
+	end
+end
+
+-- The icon back where Blizzard had it (no anchors of its own: it filled the button).
+local function RestoreIconPoints(button, state)
+	if #state.iconPoints > 0 then
+		RestorePoints(button.icon, state.iconPoints)
+	else
+		button.icon:ClearAllPoints()
+		button.icon:SetAllPoints(button)
+	end
+end
+
+-- Rounded corners on or off. On: the icon is inset by the border thickness and cut to
+-- the rounded shape; the black rounded shape behind it shows as the border; the slot
+-- background, hover/pressed/checked highlights and the cooldown swipes take the same
+-- shape. Off: all of that undone.
+local function ApplyRounding(button, state, rounded, roundness, pixel)
+	local maskFile = MASK_PATH:format(math.min(math.max(roundness, 1), MAX_ROUNDNESS))
+	if rounded then
+		state.outerMask:SetTexture(maskFile, "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+		state.innerMask:SetTexture(maskFile, "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+	end
+
+	if button.icon then
+		if rounded then
+			button.icon:ClearAllPoints()
+			button.icon:SetPoint("TOPLEFT", button, "TOPLEFT", pixel, -pixel)
+			button.icon:SetPoint("BOTTOMRIGHT", button, "BOTTOMRIGHT", -pixel, pixel)
+			state.innerMask:ClearAllPoints()
+			state.innerMask:SetAllPoints(button.icon)
+		else
+			RestoreIconPoints(button, state)
+		end
+		SetMasked(state, button.icon, state.innerMask, rounded)
+	end
+
+	state.roundBorder:SetShown(rounded and pixel > 0)
+	SetMasked(state, state.roundBorder, state.outerMask, rounded)
+	SetMasked(state, state.background, state.outerMask, rounded)
+	for key in pairs(STATE_COLORS) do
+		if button[key] then
+			SetMasked(state, button[key], state.outerMask, rounded)
+		end
+	end
+
+	-- The swipe is a plain colour normally; the mask image gives it the rounded shape, a
+	-- solid square gives the plain one back. Its colour is set again after a new texture.
+	for key in pairs(state.cooldownPoints) do
+		local cooldown = button[key]
+		if rounded or state.swipeChanged then
+			cooldown:SetSwipeTexture(rounded and maskFile or SQUARE_SWIPE)
+			cooldown:SetSwipeColor(unpack(SWIPE_COLOR))
+		end
+	end
+	state.swipeChanged = rounded
+end
+
 local function StyleButton(button, db)
 	local state = styled[button]
 	if not state then
@@ -206,6 +287,20 @@ local function StyleButton(button, db)
 		-- Below the icon, which sits at BACKGROUND sublevel 0.
 		state.background = button:CreateTexture(nil, "BACKGROUND", nil, -8)
 		state.background:SetAllPoints(button)
+
+		-- Rounded corners: a black rounded shape behind the icon is the border (the
+		-- straight lines can't follow a curve); the masks are filled in by ApplyRounding.
+		if button.icon then
+			state.iconPoints = SavePoints(button.icon)
+		end
+		state.roundBorder = button:CreateTexture(nil, "BACKGROUND", nil, -7)
+		state.roundBorder:SetAllPoints(button)
+		state.roundBorder:SetColorTexture(0, 0, 0, 1)
+		state.roundBorder:Hide()
+		state.outerMask = button:CreateMaskTexture()
+		state.outerMask:SetAllPoints(button)
+		state.innerMask = button:CreateMaskTexture()
+		state.masked = {} -- [texture] = mask, while it's added
 		styled[button] = state
 	end
 
@@ -244,7 +339,9 @@ local function StyleButton(button, db)
 	end
 
 	LayoutBorder(button, state.border)
-	SetBorderShown(state.border, pixel > 0)
+	-- Rounded: the rounded shape behind the icon is the border instead of the lines.
+	ApplyRounding(button, state, db.rounded, db.roundness, pixel)
+	SetBorderShown(state.border, pixel > 0 and not db.rounded)
 
 	-- Fonts: the addon's font and outline, our sizes.
 	local fontPath, outline = ns.GetFont()
@@ -273,6 +370,7 @@ local function UnstyleButton(button)
 	for key, alpha in pairs(state.alpha) do
 		button[key]:SetAlpha(alpha)
 	end
+	ApplyRounding(button, state, false, 1, 0)
 	state.background:Hide()
 
 	if button.icon then
@@ -435,8 +533,30 @@ function ActionBars:CreatePage(page)
 	local _, borderLabel = CreateSlider(self, page, sliderAnchor, "Border thickness", "borderSize", { 0, 5, 5, "%d" })
 	local _, opacityLabel = CreateSlider(self, page, borderLabel, "Background", "backgroundOpacity", OPACITY_RANGE)
 
+	-- Rounded corners; the roundness slider is greyed out while they're off.
+	local roundnessSlider, roundnessLabel
+	local function UpdateRoundnessEnabled()
+		roundnessSlider:SetEnabled(module.db.rounded)
+		roundnessLabel:SetFontObject(module.db.rounded and "GameFontHighlight" or "GameFontDisable")
+	end
+	local roundedCheck = CreateFrame("CheckButton", nil, page, "UICheckButtonTemplate")
+	roundedCheck:SetPoint("TOPLEFT", opacityLabel, "BOTTOMLEFT", -4, -10)
+	roundedCheck.Text:SetFontObject("GameFontHighlight")
+	roundedCheck.Text:SetText("Rounded corners")
+	roundedCheck:SetChecked(self.db.rounded)
+	roundedCheck:SetScript("OnClick", function(button)
+		module.db.rounded = button:GetChecked()
+		UpdateRoundnessEnabled()
+		module:Refresh()
+	end)
+	local roundedAnchor = CreateFrame("Frame", nil, page)
+	roundedAnchor:SetPoint("TOPLEFT", roundedCheck, "BOTTOMLEFT", 4, 14)
+	roundedAnchor:SetSize(1, 1)
+	roundnessSlider, roundnessLabel = CreateSlider(self, page, roundedAnchor, "Corner roundness", "roundness", { 1, MAX_ROUNDNESS, MAX_ROUNDNESS - 1, "%d" })
+	UpdateRoundnessEnabled()
+
 	local fontsHeader = CreateLabel(page, "Text sizes", "GameFontNormal")
-	fontsHeader:SetPoint("TOPLEFT", opacityLabel, "BOTTOMLEFT", 0, -20)
+	fontsHeader:SetPoint("TOPLEFT", roundnessLabel, "BOTTOMLEFT", 0, -20)
 	local fontsNote = CreateLabel(page, "The font and outline are on the Fonts page.", "GameFontDisableSmall")
 	fontsNote:SetPoint("TOPLEFT", fontsHeader, "BOTTOMLEFT", 0, -6)
 

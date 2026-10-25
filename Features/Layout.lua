@@ -49,6 +49,7 @@ function ns.IsUnlocked()
 end
 
 local ShowGrid -- defined with the grid code
+local HookMoverFrames, HideNudgeBox, RefreshNudgeBox -- defined with the nudge box code
 
 function ns.SetUnlocked(value)
 	value = value and true or false
@@ -62,6 +63,11 @@ function ns.SetUnlocked(value)
 		end
 	end
 	ShowGrid(unlocked and Layout.db.showGrid)
+	if unlocked then
+		HookMoverFrames() -- after the modules above, so their frames exist
+	else
+		HideNudgeBox()
+	end
 	if ns.MainWindow.SetUnlockChecked then
 		ns.MainWindow:SetUnlockChecked(unlocked)
 	end
@@ -102,8 +108,201 @@ local function SetMoverPosition(key, x, y)
 		movers[partner].save(-x, y)
 	end
 	RefreshSliders()
+	RefreshNudgeBox()
 end
 ns.SetMoverPosition = SetMoverPosition
+
+---------------------------------------------------------------------------
+-- Action bars: Blizzard's Edit Mode
+---------------------------------------------------------------------------
+
+-- The action bars stay Blizzard's (secure, owned by Edit Mode), so they're placed in
+-- Edit Mode. The window's "Edit action bars" button opens it the way /editmode does,
+-- hiding the window without locking (the frames and grid stay up), and brings the
+-- window back when Edit Mode closes.
+
+local editModeFromUnlock = false
+local editModeHooked = false
+
+-- True while the window is hidden for Edit Mode; the window doesn't lock on hide then.
+function ns.IsInEditModeFromUnlock()
+	return editModeFromUnlock
+end
+
+function ns.OpenEditMode()
+	local manager = EditModeManagerFrame
+	if InCombatLockdown() or not manager or not manager:CanEnterEditMode() then
+		Layout:Print("Edit Mode can't be opened right now (it isn't available in combat).")
+		return
+	end
+	if not editModeHooked then
+		editModeHooked = true
+		manager:HookScript("OnHide", function()
+			if editModeFromUnlock then
+				editModeFromUnlock = false
+				ns.MainWindow:Show()
+			end
+		end)
+	end
+	editModeFromUnlock = true
+	ns.MainWindow:Hide()
+	ShowUIPanel(manager)
+	if not manager:IsShown() then
+		-- Didn't open after all: put the window back.
+		editModeFromUnlock = false
+		ns.MainWindow:Show()
+	end
+end
+
+---------------------------------------------------------------------------
+-- Nudge box: double-click a frame while unlocked
+---------------------------------------------------------------------------
+
+-- A small box above the frame with its X and Y: - and + move it 1 (10 with Shift),
+-- or type a number and press Enter. The frames are of different kinds (secure unit
+-- buttons, plain frames), so a double-click is two left-button releases close together.
+
+local DOUBLE_CLICK_TIME = 0.35
+local nudgeBox
+local hookedFrames = {} -- [frame] = true once its double-click is hooked
+
+local function NudgeTo(x, y)
+	if nudgeBox and nudgeBox.key then
+		SetMoverPosition(nudgeBox.key, x, y)
+	end
+end
+
+local function CreateNudgeRow(box, anchor, axis)
+	local label = box:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+	label:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -10)
+	label:SetWidth(16)
+	label:SetText(axis == "x" and "X" or "Y")
+
+	local function Step(delta)
+		local x, y = ns.GetMoverPosition(nudgeBox.key)
+		if IsShiftKeyDown() then
+			delta = delta * 10
+		end
+		if axis == "x" then
+			NudgeTo(x + delta, y)
+		else
+			NudgeTo(x, y + delta)
+		end
+	end
+
+	local minus = CreateFrame("Button", nil, box, "UIPanelButtonTemplate")
+	minus:SetSize(26, 22)
+	minus:SetPoint("LEFT", label, "RIGHT", 4, 0)
+	minus:SetText("-")
+	minus:SetScript("OnClick", function()
+		Step(-1)
+	end)
+
+	local edit = CreateFrame("EditBox", nil, box, "InputBoxTemplate")
+	edit:SetSize(60, 20)
+	edit:SetPoint("LEFT", minus, "RIGHT", 10, 0)
+	edit:SetAutoFocus(false)
+	edit:SetMaxLetters(6)
+	edit:SetJustifyH("CENTER")
+	edit:SetScript("OnEnterPressed", function(self)
+		local value = tonumber(self:GetText())
+		if value then
+			local x, y = ns.GetMoverPosition(nudgeBox.key)
+			if axis == "x" then
+				NudgeTo(value, y)
+			else
+				NudgeTo(x, value)
+			end
+		end
+		self:ClearFocus()
+	end)
+	edit:SetScript("OnEscapePressed", function(self)
+		self:ClearFocus()
+	end)
+	edit:SetScript("OnEditFocusLost", function()
+		RefreshNudgeBox()
+	end)
+
+	local plus = CreateFrame("Button", nil, box, "UIPanelButtonTemplate")
+	plus:SetSize(26, 22)
+	plus:SetPoint("LEFT", edit, "RIGHT", 4, 0)
+	plus:SetText("+")
+	plus:SetScript("OnClick", function()
+		Step(1)
+	end)
+
+	return edit, label
+end
+
+local function BuildNudgeBox()
+	nudgeBox = CreateFrame("Frame", "AdamAddonNudgeBox", UIParent, "BasicFrameTemplateWithInset")
+	nudgeBox:SetSize(190, 104)
+	nudgeBox:SetFrameStrata("DIALOG")
+	nudgeBox:SetClampedToScreen(true)
+	nudgeBox:EnableMouse(true)
+	nudgeBox:Hide()
+
+	local top = CreateFrame("Frame", nil, nudgeBox)
+	top:SetPoint("TOPLEFT", 14, -26)
+	top:SetSize(1, 1)
+	local xLabel
+	nudgeBox.XEdit, xLabel = CreateNudgeRow(nudgeBox, top, "x")
+	nudgeBox.YEdit = CreateNudgeRow(nudgeBox, xLabel, "y")
+end
+
+RefreshNudgeBox = function()
+	if not nudgeBox or not nudgeBox:IsShown() or not nudgeBox.key then
+		return
+	end
+	local x, y = ns.GetMoverPosition(nudgeBox.key)
+	if not nudgeBox.XEdit:HasFocus() then
+		nudgeBox.XEdit:SetText(tostring(x))
+	end
+	if not nudgeBox.YEdit:HasFocus() then
+		nudgeBox.YEdit:SetText(tostring(y))
+	end
+end
+
+HideNudgeBox = function()
+	if nudgeBox then
+		nudgeBox:Hide()
+	end
+end
+
+local function ShowNudgeBox(key, frame)
+	if not nudgeBox then
+		BuildNudgeBox()
+	end
+	nudgeBox.key = key
+	nudgeBox.TitleText:SetText(movers[key].title)
+	nudgeBox:ClearAllPoints()
+	nudgeBox:SetPoint("BOTTOM", frame, "TOP", 0, 12)
+	nudgeBox:Show()
+	RefreshNudgeBox()
+end
+
+-- Frames are hooked the first time the frames are unlocked after they exist.
+HookMoverFrames = function()
+	for key, mover in pairs(movers) do
+		local frame = mover.getFrame()
+		if frame and not hookedFrames[frame] then
+			hookedFrames[frame] = true
+			local lastRelease = 0
+			frame:HookScript("OnMouseUp", function(self, button)
+				if not unlocked or button ~= "LeftButton" then
+					return
+				end
+				local now = GetTime()
+				if now - lastRelease <= DOUBLE_CLICK_TIME then
+					lastRelease = 0
+					ShowNudgeBox(key, self)
+				else
+					lastRelease = now
+				end
+			end)
+		end
+	end
+end
 
 ---------------------------------------------------------------------------
 -- Snapping
@@ -275,14 +474,14 @@ local function CreateCheck(parent, text, checked, onClick)
 end
 
 -- onChange(value) runs when the user moves it, not when RefreshSliders sets it.
-local function CreateSlider(parent, anchor, labelText, minValue, maxValue, value, onChange)
+-- A short "X" or "Y" slider; the caller places the label (the slider follows it).
+local function CreateSlider(parent, labelText, minValue, maxValue, value, onChange)
 	local label = CreateLabel(parent, labelText)
-	label:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -10)
-	label:SetWidth(40)
+	label:SetWidth(14)
 
 	local slider = CreateFrame("Frame", nil, parent, "MinimalSliderWithSteppersTemplate")
-	slider:SetPoint("LEFT", label, "RIGHT", 8, 0)
-	slider:SetSize(260, 20)
+	slider:SetPoint("LEFT", label, "RIGHT", 20, 0) -- room for its left stepper
+	slider:SetSize(80, 20)
 	slider:Init(value, minValue, maxValue, maxValue - minValue, {
 		[MinimalSliderWithSteppersMixin.Label.Right] = function(sliderValue)
 			return string.format("%d", sliderValue)
@@ -317,9 +516,10 @@ function Layout:CreatePage(page)
 	local title = CreateLabel(page, "Layout", "GameFontNormalLarge")
 	title:SetPoint("TOPLEFT", 4, -4)
 
-	local intro = CreateLabel(page, "Tick |cffffd100Unlock frames|r at the top of this window to drag the player, "
-		.. "target, power bar and cheapest items list. Closing the window locks them again. "
-		.. "Hold Shift when letting go to place a frame without snapping. X and Y are the frame's centre, "
+	local intro = CreateLabel(page, "Tick |cffffd100Unlock frames|r at the top of this window to drag the frames "
+		.. "below (and the blue boxes for your buffs and debuffs). Closing the window locks them again. "
+		.. "Hold Shift when letting go to place a frame without snapping. Double-click a frame for a box "
+		.. "to move it 1 pixel at a time or type its position. X and Y are the frame's centre, "
 		.. "measured from the middle of the screen.", "GameFontDisableSmall")
 	intro:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -8)
 	intro:SetPoint("RIGHT", page, "RIGHT", -4, 0)
@@ -366,25 +566,29 @@ function Layout:CreatePage(page)
 	end, gridSlider)
 	ns.MakeSliderEditable(gridSlider)
 
-	-- One X and Y pair per frame, in the order the features registered them.
+	-- One line per frame (name, X, Y), in the order the features registered them.
 	local halfWidth = math.floor(UIParent:GetWidth() / 2)
 	local halfHeight = math.floor(UIParent:GetHeight() / 2)
 	local previous = gridLabel
 	for _, key in ipairs(moverOrder) do
 		local mover = movers[key]
-		local header = CreateLabel(page, mover.title, "GameFontNormal")
-		header:SetPoint("TOPLEFT", previous, "BOTTOMLEFT", 0, -16)
+		local header = CreateLabel(page, mover.title, "GameFontNormalSmall")
+		header:SetPoint("TOPLEFT", previous, "BOTTOMLEFT", 0, -14)
+		header:SetWidth(120)
+		header:SetWordWrap(false)
 		local x, y = ns.GetMoverPosition(key)
-		local xSlider, xLabel = CreateSlider(page, header, "X", -halfWidth, halfWidth, x, function(value)
+		local xSlider, xLabel = CreateSlider(page, "X", -halfWidth, halfWidth, x, function(value)
 			local _, currentY = ns.GetMoverPosition(key)
 			SetMoverPosition(key, value, currentY)
 		end)
-		local ySlider, yLabel = CreateSlider(page, xLabel, "Y", -halfHeight, halfHeight, y, function(value)
+		xLabel:SetPoint("LEFT", header, "RIGHT", 0, 0)
+		local ySlider, yLabel = CreateSlider(page, "Y", -halfHeight, halfHeight, y, function(value)
 			local currentX = ns.GetMoverPosition(key)
 			SetMoverPosition(key, currentX, value)
 		end)
+		yLabel:SetPoint("LEFT", xSlider, "RIGHT", 60, 0) -- past X's value
 		positionSliders[key] = { x = xSlider, y = ySlider }
-		previous = yLabel
+		previous = header
 	end
 end
 

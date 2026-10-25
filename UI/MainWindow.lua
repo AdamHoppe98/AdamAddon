@@ -7,7 +7,7 @@ local MainWindow = {}
 ns.MainWindow = MainWindow
 
 local WINDOW_WIDTH = 640
-local WINDOW_HEIGHT = 560
+local WINDOW_HEIGHT = 600
 local NAV_WIDTH = 150
 local NAV_BUTTON_HEIGHT = 22
 
@@ -96,7 +96,25 @@ local function BuildFrame()
 		end
 	end)
 	frame.UnlockCheck = unlockCheck
+
+	-- The action bars are placed in Blizzard's Edit Mode; this opens it while unlocked.
+	local editModeButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+	editModeButton:SetSize(110, 18)
+	editModeButton:SetPoint("LEFT", unlockCheck.Text, "RIGHT", 10, 0)
+	editModeButton:SetText("Edit action bars")
+	editModeButton:SetScript("OnClick", function()
+		if ns.OpenEditMode then
+			ns.OpenEditMode()
+		end
+	end)
+	editModeButton:Hide()
+	frame.EditModeButton = editModeButton
+
+	-- Closing locks the frames, except when the window only steps aside for Edit Mode.
 	frame:HookScript("OnHide", function()
+		if ns.IsInEditModeFromUnlock and ns.IsInEditModeFromUnlock() then
+			return
+		end
 		if ns.SetUnlocked then
 			ns.SetUnlocked(false)
 		end
@@ -141,6 +159,7 @@ end
 function MainWindow:SetUnlockChecked(checked)
 	if frame then
 		frame.UnlockCheck:SetChecked(checked)
+		frame.EditModeButton:SetShown(checked)
 	end
 end
 

@@ -23,6 +23,9 @@ Features\Fonts.lua
 Features\Layout.lua
 Features\ActionBars.lua
 Features\UnitFrames.lua
+Features\PlayerAuras.lua
+Features\TrackedBuffs.lua
 Features\PowerBar.lua
 Features\ManaSpark.lua
+Features\SwingTimers.lua
 Features\Cheapest.lua
