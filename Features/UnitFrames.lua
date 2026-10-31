@@ -928,6 +928,9 @@ local function CreateCircle(parent, layer, subLevel)
 	return texture
 end
 
+-- Shared with Totems, whose round icons are drawn like the portrait.
+ns.CreateCircle = CreateCircle
+
 -- The time-left countdown and the stack count of the buttons in one list (kept per
 -- container, so a text size change reaches buttons that already exist). Blizzard may lock
 -- them while auras are secret; those keep their old size until the next /reload.
@@ -1653,6 +1656,11 @@ function UnitFrames:Apply()
 
 	-- Our player cast bar replaces Blizzard's.
 	SetBlizzardPlayerCastBarOff(self.db.enabled and self.db.playerCastBar)
+
+	-- The totem row hangs off the player frame and uses its border size.
+	if ns.RefreshTotems then
+		ns.RefreshTotems()
+	end
 end
 
 function UnitFrames:SetEnabled(enabled)
