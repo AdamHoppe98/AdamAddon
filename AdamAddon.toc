@@ -23,6 +23,7 @@ Features\Fonts.lua
 Features\Layout.lua
 Features\ActionBars.lua
 Features\UnitFrames.lua
+Features\RaidFrames.lua
 Features\PlayerAuras.lua
 Features\Totems.lua
 Features\TrackedBuffs.lua
