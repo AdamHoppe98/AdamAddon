@@ -11,6 +11,13 @@ local addonName, ns = ...
 -- Totem data can be secret (GetTotemInfo: SecretWhenTotemSlotSecret). The time left is
 -- the cooldown's countdown, which takes secret durations, and a slot whose "have totem"
 -- flag is secret is shown or hidden through its alpha, never compared.
+--
+-- Dismissing: DestroyTotem is protected, so each button is a SecureActionButtonTemplate
+-- with the "destroytotem" action (Blizzard_FrameXML\SecureTemplates.lua) on right-click.
+-- Each button belongs to one totem slot for good. Secure buttons can't be shown, hidden
+-- or moved in combat, so the row is only rearranged out of combat: when combat starts
+-- every button is shown, and in combat a slot's totem appearing or running out only
+-- fades its button in or out where it stands. When combat ends the row closes up again.
 
 local Totems = ns:RegisterModule("Totems", {
 	title = "Totems",
@@ -41,9 +48,10 @@ local PREVIEW_ICON = "Interface\\Icons\\INV_Misc_QuestionMark"
 local PREVIEW_DURATION = 45
 local ICON_CROP = 0.08
 local SWIPE_COLOR = { 0, 0, 0, 0.65 } -- as on Blizzard's totem buttons
+local DISMISS_ACTION = "destroytotem" -- SECURE_ACTIONS.destroytotem, reads "totem-slot"
 
 local row            -- holds the buttons; nil until first needed
-local buttons = {}
+local buttons = {}   -- one per totem slot, in Blizzard's slot order
 local texts = {}     -- countdown font strings, for text size changes
 local blizzardOff = false
 local blizzardHooked = false
@@ -52,6 +60,7 @@ local containerMoved = false
 local containerHooked = false
 local movingContainer = false -- our own SetPoint calls, so the hook leaves them alone
 local pendingContainer = false
+local pendingApply = false    -- Apply was asked for in combat; done when it ends
 
 -- Shown with sample totems while this page is open or the frames are unlocked.
 local previewTotems = false
@@ -123,18 +132,8 @@ local function CreateCooldown(button, icon, round)
 	return cooldown, text
 end
 
-local function OnButtonClick(button, mouseButton)
-	if mouseButton ~= "RightButton" or not button.slot then
-		return
-	end
-	local cannotDismiss = GetTotemCannotDismiss(button.slot)
-	if not IsSecret(cannotDismiss) and not cannotDismiss then
-		DestroyTotem(button.slot)
-	end
-end
-
 local function OnButtonEnter(button)
-	if not button.slot then
+	if IsPreview() or not button.active then
 		return
 	end
 	GameTooltip:SetOwner(button, "ANCHOR_BOTTOMRIGHT")
@@ -143,10 +142,16 @@ end
 
 -- Both looks are built; Layout shows one. Round: black edge, class-coloured ring, black
 -- edge, icon, like the portrait. Square: black background, cropped icon 1 px inside.
-local function CreateButton()
-	local button = CreateFrame("Button", nil, row)
+-- Right-click runs the secure "destroytotem" action on this button's slot. The click
+-- fires on release whatever the "cast on key down" setting says.
+local function CreateButton(slot)
+	local button = CreateFrame("Button", nil, row, "SecureActionButtonTemplate")
+	button.slot = slot
 	button:RegisterForClicks("RightButtonUp")
-	button:SetScript("OnClick", OnButtonClick)
+	button:SetAttribute("useOnKeyDown", false)
+	button:SetAttribute("totem-slot", slot)
+	button:SetAttribute("type2", DISMISS_ACTION)
+	button.clickable = true
 	button:SetScript("OnEnter", OnButtonEnter)
 	button:SetScript("OnLeave", GameTooltip_Hide)
 
@@ -173,17 +178,18 @@ local function CreateButton()
 	return button
 end
 
+-- Out of combat only (secure buttons).
 local function Build()
 	row = CreateFrame("Frame", nil, UIParent)
 	row:SetFrameStrata("LOW")
 	row:SetSize(1, 1)
-	for index = 1, (MAX_TOTEMS or 4) do
-		buttons[index] = CreateButton()
+	for index, slot in ipairs(GetSlotOrder()) do
+		buttons[index] = CreateButton(slot)
 	end
 end
 
 ---------------------------------------------------------------------------
--- Layout
+-- Layout (out of combat only)
 ---------------------------------------------------------------------------
 
 local function Inset(texture, inset)
@@ -192,12 +198,10 @@ local function Inset(texture, inset)
 	texture:SetPoint("BOTTOMRIGHT", -inset, inset)
 end
 
-local function LayoutButton(button, index)
+local function LayoutButton(button)
 	local db = Totems.db
 	local size = db.size
 	button:SetSize(size, size)
-	button:ClearAllPoints()
-	button:SetPoint("TOPLEFT", row, "TOPLEFT", (index - 1) * (size + db.spacing), 0)
 
 	local scale = button:GetEffectiveScale()
 	-- The countdown text is left to its cooldown, which hides with it.
@@ -251,25 +255,60 @@ local function PlaceRow()
 	row:SetFrameLevel(playerFrame:GetFrameLevel() + 12)
 end
 
+local function PlaceButton(button, position)
+	local db = Totems.db
+	button:ClearAllPoints()
+	button:SetPoint("TOPLEFT", row, "TOPLEFT", (position - 1) * (db.size + db.spacing), 0)
+end
+
+-- No dismissing while sample totems show: the click would remove a real one.
+local function SetClickable(button, clickable)
+	if button.clickable ~= clickable then
+		button.clickable = clickable
+		button:SetAttribute("type2", clickable and DISMISS_ACTION or nil)
+	end
+end
+
+-- Active totems left to right, in Blizzard's slot order, the empty slots hidden after
+-- them. A slot whose flag is secret takes a place and shows through its alpha.
+local function Arrange(preview)
+	local position = 0
+	for _, button in ipairs(buttons) do
+		SetClickable(button, not preview)
+		if preview or button.active then
+			position = position + 1
+			PlaceButton(button, position)
+			button:Show()
+		end
+	end
+	for _, button in ipairs(buttons) do
+		if not (preview or button.active) then
+			position = position + 1
+			PlaceButton(button, position)
+			button:Hide()
+		end
+	end
+end
+
 ---------------------------------------------------------------------------
--- Updating
+-- Updating (allowed in combat: textures, cooldowns and alpha only)
 ---------------------------------------------------------------------------
 
 local function ClearButton(button)
-	button.slot = nil
+	button.active = false
 	button.Round.Cooldown:Clear()
 	button.Square.Cooldown:Clear()
-	button:Hide()
+	button:SetAlpha(0)
 end
 
 -- Readable times go straight in; secret ones through the slot's duration object.
-local function SetButtonTime(button, slot, startTime, duration)
+local function SetButtonTime(button, startTime, duration)
 	local cooldown = button.Style.Cooldown
 	if not IsSecret(startTime) and not IsSecret(duration) then
 		cooldown:SetCooldown(startTime, duration)
 		return
 	end
-	local ok, durationObject = pcall(GetTotemDuration, slot)
+	local ok, durationObject = pcall(GetTotemDuration, button.slot)
 	if ok and durationObject and not IsSecret(durationObject) then
 		pcall(cooldown.SetCooldownFromDurationObject, cooldown, durationObject)
 	else
@@ -277,55 +316,59 @@ local function SetButtonTime(button, slot, startTime, duration)
 	end
 end
 
-local function ShowPreview()
-	local now = GetTime()
-	for index, button in ipairs(buttons) do
-		button.slot = nil
-		button.Style.Icon:SetTexture(PREVIEW_ICON)
-		button.Style.Cooldown:SetCooldown(now - index * 5, PREVIEW_DURATION)
+local function ShowPreviewButton(button, index)
+	button.Style.Icon:SetTexture(PREVIEW_ICON)
+	button.Style.Cooldown:SetCooldown(GetTime() - index * 5, PREVIEW_DURATION)
+	button:SetAlpha(1)
+end
+
+-- button.active: true, false, or "secret" (shown by alpha from the secret flag).
+local function UpdateButton(button)
+	local haveTotem, _, startTime, duration, icon = GetTotemInfo(button.slot)
+	local secretFlag = IsSecret(haveTotem)
+	local active = secretFlag
+		or (haveTotem and (IsSecret(duration) or (duration and duration > 0)))
+	if not active then
+		ClearButton(button)
+		return
+	end
+	button.active = secretFlag and "secret" or true
+	button.Style.Icon:SetTexture(icon)
+	SetButtonTime(button, startTime, duration)
+	if secretFlag then
+		button:SetAlphaFromBoolean(haveTotem)
+	else
 		button:SetAlpha(1)
-		button:Show()
 	end
 end
 
--- Active totems left to right, in Blizzard's slot order. A slot whose flag is secret
--- takes a place and is shown or hidden by alpha.
 local function UpdateTotems()
-	if not row then
+	if not row or not Totems.db then
 		return
 	end
+	local inCombat = InCombatLockdown()
 	if not IsActive() then
-		row:Hide()
+		if not inCombat and row:IsShown() then
+			row:Hide()
+		end
 		return
 	end
-	row:Show()
-	if IsPreview() then
-		ShowPreview()
-		return
+	if not inCombat and not row:IsShown() then
+		row:Show()
 	end
 
-	local index = 0
-	for _, slot in ipairs(GetSlotOrder()) do
-		local haveTotem, _, startTime, duration, icon = GetTotemInfo(slot)
-		local secretFlag = IsSecret(haveTotem)
-		local active = secretFlag
-			or (haveTotem and (IsSecret(duration) or (duration and duration > 0)))
-		local button = buttons[index + 1]
-		if active and button then
-			index = index + 1
-			button.slot = slot
-			button.Style.Icon:SetTexture(icon)
-			SetButtonTime(button, slot, startTime, duration)
-			if secretFlag then
-				button:SetAlphaFromBoolean(haveTotem)
-			else
-				button:SetAlpha(1)
-			end
-			button:Show()
+	local preview = IsPreview()
+	for index, button in ipairs(buttons) do
+		if preview then
+			ShowPreviewButton(button, index)
+		else
+			UpdateButton(button)
 		end
 	end
-	for unused = index + 1, #buttons do
-		ClearButton(buttons[unused])
+	if inCombat then
+		pendingApply = true -- close the row up when combat ends
+	else
+		Arrange(preview)
 	end
 end
 
@@ -435,6 +478,8 @@ end
 -- Applying
 ---------------------------------------------------------------------------
 
+-- Building, laying out and moving the secure buttons wait for the end of combat; the
+-- icons and times still update meanwhile.
 function Totems:Apply()
 	if not self.db then
 		return
@@ -442,8 +487,16 @@ function Totems:Apply()
 	local active = IsActive()
 	SetBlizzardTotemsOff(active)
 	UpdateBlizzardContainer()
+
+	if InCombatLockdown() then
+		pendingApply = true
+		UpdateTotems()
+		return
+	end
+	pendingApply = false
+
 	if not active then
-		if row then
+		if row and row:IsShown() then
 			row:Hide()
 		end
 		return
@@ -453,8 +506,8 @@ function Totems:Apply()
 		Build()
 	end
 	PlaceRow()
-	for index, button in ipairs(buttons) do
-		LayoutButton(button, index)
+	for _, button in ipairs(buttons) do
+		LayoutButton(button)
 	end
 	ns.SetAuraTextSize(texts, self.db.textSize)
 	UpdateTotems()
@@ -475,9 +528,26 @@ function Totems:OnTotemUpdate()
 	end
 end
 
+-- Last chance before the lockdown: every button shown (the empty ones at alpha 0), so a
+-- totem put down in combat can fade in at its slot's place.
+function Totems:OnCombatStarting()
+	if not row or not row:IsShown() or InCombatLockdown() then
+		return
+	end
+	for _, button in ipairs(buttons) do
+		button:Show()
+	end
+end
+
 function Totems:OnCombatEnded()
-	if pendingContainer and self.db then
+	if not self.db then
+		return
+	end
+	if pendingContainer then
 		UpdateBlizzardContainer()
+	end
+	if pendingApply then
+		self:Apply()
 	end
 end
 
@@ -491,6 +561,7 @@ end
 
 Totems:RegisterEvent("PLAYER_TOTEM_UPDATE", "OnTotemUpdate")
 Totems:RegisterEvent("PLAYER_ENTERING_WORLD", "OnTotemUpdate")
+Totems:RegisterEvent("PLAYER_REGEN_DISABLED", "OnCombatStarting")
 Totems:RegisterEvent("PLAYER_REGEN_ENABLED", "OnCombatEnded")
 
 ---------------------------------------------------------------------------
@@ -560,7 +631,8 @@ function Totems:CreatePage(page)
 	local title = CreateLabel(page, "Totems", "GameFontNormalLarge")
 	title:SetPoint("TOPLEFT", 4, -4)
 	local intro = CreateLabel(page, "Your active totems and the time they have left, under the player frame "
-		.. "(needs the custom unit frames). Right-click a totem to dismiss it. "
+		.. "(needs the custom unit frames). Right-click a totem to dismiss it, in or out of combat. "
+		.. "In combat the row doesn't close up: an expired totem leaves a gap until combat ends. "
 		.. "X and Y move the row from the player frame's bottom left corner. Sample totems show while this page is open. "
 		.. "Switched off, Blizzard's totem bar shows under the player frame instead, and X and Y move that.",
 		"GameFontDisableSmall")

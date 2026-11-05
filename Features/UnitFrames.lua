@@ -976,11 +976,13 @@ local function InitializeAuraButton(button, size, textSize, texts, cooldowns)
 	icon:SetTexCoord(ICON_CROP, 1 - ICON_CROP, ICON_CROP, 1 - ICON_CROP)
 	button:SetIcon(icon)
 
-	-- The countdown numbers show the time left.
+	-- The countdown numbers show the time left. Reversed swipe: the shadow starts small
+	-- and grows as the aura runs out, so the icon darkens towards the end.
 	local cooldown = CreateFrame("Cooldown", nil, button, "CooldownFrameTemplate")
 	cooldown:ClearAllPoints()
 	cooldown:SetAllPoints(icon)
 	cooldown:SetDrawEdge(false)
+	cooldown:SetReverse(true)
 	cooldown:SetHideCountdownNumbers(false)
 	button:SetDurationCooldown(cooldown)
 	if cooldowns then

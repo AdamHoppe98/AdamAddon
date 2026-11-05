@@ -27,6 +27,7 @@ Features\RaidFrames.lua
 Features\PlayerAuras.lua
 Features\Totems.lua
 Features\TrackedBuffs.lua
+Features\MissingBuffs.lua
 Features\PowerBar.lua
 Features\ManaSpark.lua
 Features\SwingTimers.lua

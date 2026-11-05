@@ -11,6 +11,11 @@ local addonName, ns = ...
 -- this follows): a bar only shows with a weapon in that slot, follows weapon swaps, and
 -- dims while the target is out of range.
 --
+-- UnitAttackSpeed gives secret values while unit stats are restricted (in combat), and a
+-- secret can't be compared. So each hand's weapon and speed are remembered whenever they
+-- can be read and kept while they're secret; a swing arriving for a hand also counts as
+-- a weapon there (a weapon swapped in combat).
+--
 -- Background (opacity and colour) and bar texture are their own settings, shared by the
 -- three bars; the border thickness follows the Unit Frames setting, the font the Fonts
 -- page.
@@ -50,6 +55,14 @@ local OUT_OF_RANGE_ALPHA = 0.4
 local bars = {} -- [key] = bar frame
 local blizzardHooked = false
 
+-- Last readable weapon state per hand: hasWeapon[key] = true/false, speeds[key] = seconds.
+local hasWeapon = { mainhand = true, offhand = false, ranged = false }
+local speeds = {}
+
+local function IsSecret(value)
+	return issecretvalue ~= nil and issecretvalue(value)
+end
+
 local function IsUnlocked()
 	return ns.IsUnlocked ~= nil and ns.IsUnlocked()
 end
@@ -67,24 +80,35 @@ end
 -- Weapons and visibility
 ---------------------------------------------------------------------------
 
-local function HasWeapon(bar)
-	local _, offHandSpeed, rangedSpeed = UnitAttackSpeed("player")
-	if bar.info.key == "offhand" then
-		return offHandSpeed ~= nil and offHandSpeed > 0
-	elseif bar.info.key == "ranged" then
-		return rangedSpeed ~= nil and rangedSpeed > 0
+-- Reads the attack speeds into hasWeapon/speeds, skipping any that are secret. Returns
+-- whether all three could be read.
+local function ReadWeapons()
+	local readable = true
+	local function Store(key, speed)
+		if IsSecret(speed) then
+			readable = false
+			return
+		end
+		local present = speed ~= nil and speed > 0
+		if key ~= "mainhand" then
+			hasWeapon[key] = present
+		end
+		speeds[key] = present and speed or nil
 	end
-	return true
+	local mainHandSpeed, offHandSpeed, rangedSpeed = UnitAttackSpeed("player")
+	Store("mainhand", mainHandSpeed)
+	Store("offhand", offHandSpeed)
+	Store("ranged", rangedSpeed)
+	return readable
 end
 
+local function HasWeapon(bar)
+	return hasWeapon[bar.info.key] == true
+end
+
+-- nil when unknown (never read yet, or no weapon).
 local function GetEquippedSpeed(bar)
-	local mainHandSpeed, offHandSpeed, rangedSpeed = UnitAttackSpeed("player")
-	if bar.info.key == "offhand" then
-		return offHandSpeed
-	elseif bar.info.key == "ranged" then
-		return rangedSpeed
-	end
-	return mainHandSpeed
+	return speeds[bar.info.key]
 end
 
 -- Switched on (feature and bar).
@@ -222,10 +246,11 @@ local function CreateBar(info)
 	local textLayer = CreateFrame("Frame", nil, bar)
 	textLayer:SetAllPoints()
 	textLayer:SetFrameLevel(borderFrame:GetFrameLevel() + 1)
-	bar.LabelText = textLayer:CreateFontString(nil, "OVERLAY")
+	-- A font from the start (text can't be set without one); LayoutBar sets the real one.
+	bar.LabelText = textLayer:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 	bar.LabelText:SetJustifyH("LEFT")
 	bar.LabelText:SetText(info.label)
-	bar.TimeText = textLayer:CreateFontString(nil, "OVERLAY")
+	bar.TimeText = textLayer:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 	bar.TimeText:SetJustifyH("RIGHT")
 
 	bar:SetScript("OnUpdate", OnBarUpdate)
@@ -343,6 +368,25 @@ local function UpdateBlizzardBars()
 	blizzardHooked = true
 end
 
+local function UpdateAllShown()
+	for _, bar in pairs(bars) do
+		UpdateShown(bar)
+	end
+end
+
+-- Weapons, range checks and visibility; no layout.
+local function UpdateState()
+	ReadWeapons()
+	for _, info in ipairs(BARS) do
+		local bar = bars[info.key]
+		if not IsBarActive(bar) then
+			ClearSwing(bar)
+		end
+	end
+	UpdateRangeChecks()
+	UpdateAllShown()
+end
+
 function SwingTimers:Apply()
 	if not next(bars) then
 		for _, info in ipairs(BARS) do
@@ -350,23 +394,10 @@ function SwingTimers:Apply()
 		end
 	end
 	for _, info in ipairs(BARS) do
-		local bar = bars[info.key]
-		LayoutBar(bar)
-		if not IsBarActive(bar) then
-			ClearSwing(bar)
-		end
+		LayoutBar(bars[info.key])
 	end
-	UpdateRangeChecks()
-	for _, bar in pairs(bars) do
-		UpdateShown(bar)
-	end
+	UpdateState()
 	UpdateBlizzardBars()
-end
-
-local function UpdateAllShown()
-	for _, bar in pairs(bars) do
-		UpdateShown(bar)
-	end
 end
 
 ---------------------------------------------------------------------------
@@ -382,30 +413,38 @@ function SwingTimers:OnLogin()
 	self:Apply()
 end
 
+-- A swing for a hand means a weapon is there, even if the stats are secret right now.
 function SwingTimers:OnSwing(event, duration, swingType)
+	if IsSecret(duration) or IsSecret(swingType) then
+		return
+	end
 	for _, info in ipairs(BARS) do
 		local bar = bars[info.key]
-		if bar and Enum.PlayerSwingType[info.swingType] == swingType and IsBarActive(bar) then
+		if bar and Enum.PlayerSwingType[info.swingType] == swingType and IsBarOn(bar) then
+			hasWeapon[info.key] = true
 			StartSwing(bar, duration)
 			UpdateShown(bar)
 		end
 	end
 end
 
--- Weapon swaps (no payload) and attack speed changes (unit): a running swing is
--- re-timed to the new weapon, as Blizzard does on a swap.
+-- Weapon swaps (no payload), attack speed and inventory changes (unit), entering the
+-- world. Blizzard listens to UNIT_INVENTORY_CHANGED too: WEAPON_SLOT_CHANGED doesn't fire
+-- reliably on entering the world. On a swap a running swing is re-timed to the new
+-- weapon, as Blizzard does, when its speed can be read.
 function SwingTimers:OnWeaponsChanged(event, unit)
-	if unit and unit ~= "player" then
+	if (unit and unit ~= "player") or not next(bars) then
 		return
 	end
 	if event == "WEAPON_SLOT_CHANGED" then
+		local readable = ReadWeapons()
 		for _, bar in pairs(bars) do
-			if bar.endTime and IsBarActive(bar) then
+			if readable and bar.endTime and IsBarActive(bar) then
 				StartSwing(bar, GetEquippedSpeed(bar))
 			end
 		end
 	end
-	self:Apply()
+	UpdateState()
 end
 
 function SwingTimers:OnRangeUpdate(event, swingType, isInRange, checksRange)
@@ -426,7 +465,9 @@ function SwingTimers:OnTargetChanged()
 end
 
 function SwingTimers:OnCombatChanged()
-	UpdateAllShown()
+	if next(bars) then
+		UpdateState()
+	end
 end
 
 -- The Unlock frames checkbox: the bars show as samples and take the mouse.
@@ -444,6 +485,8 @@ if AVAILABLE then
 	SwingTimers:RegisterEvent("PLAYER_SWING_RANGE_UPDATE", "OnRangeUpdate")
 	SwingTimers:RegisterEvent("WEAPON_SLOT_CHANGED", "OnWeaponsChanged")
 	SwingTimers:RegisterEvent("UNIT_ATTACK_SPEED", "OnWeaponsChanged")
+	SwingTimers:RegisterEvent("UNIT_INVENTORY_CHANGED", "OnWeaponsChanged")
+	SwingTimers:RegisterEvent("PLAYER_ENTERING_WORLD", "OnWeaponsChanged")
 	SwingTimers:RegisterEvent("PLAYER_TARGET_CHANGED", "OnTargetChanged")
 	SwingTimers:RegisterEvent("PLAYER_IN_COMBAT_CHANGED", "OnCombatChanged")
 	SwingTimers:RegisterEvent("PLAYER_REGEN_ENABLED", "OnCombatChanged")
