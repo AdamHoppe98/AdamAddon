@@ -31,5 +31,6 @@ Features\MissingBuffs.lua
 Features\PowerBar.lua
 Features\ManaSpark.lua
 Features\SwingTimers.lua
+Features\SpellPowerText.lua
 Features\Cheapest.lua
 Features\Profiles.lua
