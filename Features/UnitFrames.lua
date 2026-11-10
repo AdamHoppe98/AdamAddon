@@ -7,7 +7,8 @@ local addonName, ns = ...
 -- right. Target: mirrored, "% | value" bottom left with a combat icon and a small power
 -- bar after it, buffs and debuffs above (debuff borders by dispel type), a cast bar
 -- below, gold dragon for elites and bosses, silver for rares.
--- Both: level centred on the portrait's bottom edge (the target's coloured by difficulty).
+-- Both: level centred on the portrait's bottom edge (the target's coloured by difficulty),
+-- and a crown centred on its top edge when the unit leads the group.
 -- Target of target: a small bar with the name, right of the target.
 --
 -- The frames are secure unit buttons (click to target, right-click for the menu), so
@@ -223,6 +224,7 @@ local DEFAULT_BAR_TEXTURE = MEDIA .. "Melli.tga"
 local DEFAULT_FONT = "Fonts\\FRIZQT__.TTF"
 local ICON_CROP = 0.08
 local COMBAT_ICON_ATLAS = "UI-HUD-UnitFrame-Player-CombatIcon" -- same art as Blizzard's player frame
+local LEADER_ICON_ATLAS = "UI-HUD-UnitFrame-Player-Group-LeaderIcon" -- Blizzard's player/target crown
 local PORTRAIT_MASK = "Interface\\CharacterFrame\\TempPortraitAlphaMask"
 local MAX_AURAS = 16 -- per group (buffs, debuffs)
 
@@ -633,6 +635,21 @@ local function UpdateLevel(frame)
 	text:SetTextColor(r, g, b)
 end
 
+-- Crown on the portrait's top edge while the unit leads the party or raid. The answer
+-- can be secret when the unit's identity is restricted; then the crown stays hidden.
+local function UpdateLeader(frame)
+	local icon = frame.LeaderIcon
+	if not icon then
+		return
+	end
+	local isLeader = UnitExists(frame.unit) and UnitIsGroupLeader(frame.unit)
+	if IsSecret(isLeader) then
+		icon:Hide()
+		return
+	end
+	icon:SetShown(isLeader and true or false)
+end
+
 local function UpdatePortrait(frame)
 	local portrait = frame.Portrait
 	if not portrait then
@@ -826,6 +843,7 @@ local function UpdateAll(frame, smooth)
 	UpdateColor(frame)
 	UpdateName(frame)
 	UpdateLevel(frame)
+	UpdateLeader(frame)
 	UpdatePortrait(frame)
 	UpdateClassification(frame)
 	UpdateCombat(frame)
@@ -1262,6 +1280,9 @@ local function BuildFrame(key)
 		levelLayer:SetAllPoints(portraitFrame)
 		levelLayer:SetFrameLevel(baseLevel + 10)
 		frame.LevelText = CreateText(levelLayer, "CENTER")
+		frame.LeaderIcon = levelLayer:CreateTexture(nil, "OVERLAY")
+		frame.LeaderIcon:SetAtlas(LEADER_ICON_ATLAS)
+		frame.LeaderIcon:Hide()
 	end
 
 	if info.showAuras then
@@ -1417,6 +1438,20 @@ local function LayoutFrame(frame)
 		frame.LevelText:ClearAllPoints()
 		frame.LevelText:SetPoint("CENTER", frame.PortraitFrame, "BOTTOM", 0, db.levelOffsetY)
 		frame.LevelText:SetFont(fontPath, textSize + 1, outline)
+
+		-- Leader crown centred on the portrait's top edge, mirroring the level (the level
+		-- offset moves it the other way, so both move out from or in towards the portrait).
+		if frame.LeaderIcon then
+			local iconHeight = textSize + 2
+			local iconWidth = iconHeight
+			local atlasInfo = C_Texture.GetAtlasInfo(LEADER_ICON_ATLAS)
+			if atlasInfo and atlasInfo.height and atlasInfo.height > 0 then
+				iconWidth = iconHeight * atlasInfo.width / atlasInfo.height
+			end
+			frame.LeaderIcon:SetSize(iconWidth, iconHeight)
+			frame.LeaderIcon:ClearAllPoints()
+			frame.LeaderIcon:SetPoint("CENTER", frame.PortraitFrame, "TOP", 0, -db.levelOffsetY)
+		end
 
 		-- Power (target) or druid mana (player): a short bar on the bottom border, X in
 		-- from the far end (so it doesn't move with the health text), centred on the line
@@ -1853,6 +1888,15 @@ function UnitFrames:OnUnitTarget(event, unit)
 	end
 end
 
+-- PARTY_LEADER_CHANGED / GROUP_ROSTER_UPDATE: the crown may move.
+function UnitFrames:OnLeaderChanged()
+	for _, key in ipairs({ "player", "target" }) do
+		if frames[key] then
+			UpdateLeader(frames[key])
+		end
+	end
+end
+
 -- PLAYER_REGEN_DISABLED / ENABLED: entering or leaving combat.
 function UnitFrames:OnCombatChanged()
 	if frames.player then
@@ -1902,6 +1946,8 @@ for _, event in ipairs({
 end
 UnitFrames:RegisterEvent("PLAYER_TARGET_CHANGED", "OnTargetChanged")
 UnitFrames:RegisterEvent("UNIT_TARGET", "OnUnitTarget")
+UnitFrames:RegisterEvent("PARTY_LEADER_CHANGED", "OnLeaderChanged")
+UnitFrames:RegisterEvent("GROUP_ROSTER_UPDATE", "OnLeaderChanged")
 UnitFrames:RegisterEvent("PLAYER_REGEN_ENABLED", "OnCombatEnded")
 UnitFrames:RegisterEvent("PLAYER_REGEN_ENABLED", "OnCombatChanged")
 UnitFrames:RegisterEvent("PLAYER_REGEN_DISABLED", "OnCombatChanged")
