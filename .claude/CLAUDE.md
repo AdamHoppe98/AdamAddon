@@ -48,6 +48,7 @@ When something can't be verified, say so in the reply instead of guessing.
 Load order (`AdamAddon.toc`): `Core.lua` → `Commands.lua` → `UI/*` → `Features/*`.
 
 - `Core.lua` — `ns:Print`, `ns:RegisterEvent/UnregisterEvent`, `ns:RegisterModule`, saved variables (`ns.db`). On `ADDON_LOADED` it fills defaults, gives each module its `module.db`, calls `OnInit`, then builds the window and minimap button. `OnLogin` runs on `PLAYER_LOGIN`.
+- Profiles: a module's `module.db` lives in the character's active profile (`AdamAddonDB.profiles[name].modules`, active name in the per-character `AdamAddonCharDB.profile`), unless the module sets `shared = true` (then it is in `AdamAddonDB.modules`, the same for every profile and left out of exports). Read other modules' settings through `ns.profile.modules`, never `ns.db.modules`. Switching profiles reloads the UI. `Features/Profiles.lua` has the page and import/export.
 - `Commands.lua` — `/adam` router. `ns:RegisterCommand(name, desc, func(args))`. `/adam <featurename>` opens that feature's page automatically.
 - `UI/MainWindow.lua` — `ns.MainWindow:Show/Hide/Toggle/ShowPage(name)`. Every module with `CreatePage` gets a menu entry; the page frame is built lazily and `OnPageShown` fires each time it becomes visible.
 - `UI/MinimapButton.lua` — minimap icon (angle saved in `ns.db.minimap`) and the TOC `AddonCompartmentFunc` global.

@@ -15,8 +15,12 @@ ns.defaults = {
 		point = nil, -- { point, relativePoint, x, y }; nil = centered
 		page = nil,  -- name of the last opened feature page
 	},
-	modules = {},
+	modules = {},  -- settings of shared modules (def.shared = true), the same for every profile
+	profiles = {}, -- [profile name] = { modules = { [module name] = settings } }
 }
+
+-- AdamAddonCharDB (saved per character) holds only which profile that character uses.
+ns.DEFAULT_PROFILE = "Default"
 
 ---------------------------------------------------------------------------
 -- Helpers
@@ -154,6 +158,8 @@ end)
 --   title         label in the window's menu (defaults to name)
 --   order         sort order in the menu (lower first, default 100)
 --   defaults      table of saved settings; available as module.db
+--   shared        true: settings are the same in every profile and not in exports
+--                 (default: settings belong to the character's active profile)
 --   commands      { sub = { desc = "...", func = function(module, args) end } }
 --   OnInit()      called once saved variables are loaded
 --   OnLogin()     called on PLAYER_LOGIN (player data is available)
@@ -229,6 +235,102 @@ function ns:GetSortedModules()
 end
 
 ---------------------------------------------------------------------------
+-- Profiles
+--
+-- Every module's settings (except shared modules) live in a named profile in
+-- AdamAddonDB.profiles. Each character picks one in AdamAddonCharDB.profile. Modules hold
+-- on to their module.db table, so switching profiles goes through a UI reload.
+---------------------------------------------------------------------------
+
+function ns:GetProfileNames()
+	local names = {}
+	for name, profile in pairs(ns.db.profiles) do
+		if type(name) == "string" and type(profile) == "table" then
+			table.insert(names, name)
+		end
+	end
+	table.sort(names, function(a, b)
+		return a:lower() < b:lower()
+	end)
+	return names
+end
+
+function ns:ProfileExists(name)
+	return type(name) == "string" and type(ns.db.profiles[name]) == "table"
+end
+
+-- Makes a profile holding `modules` (a table of module settings, or nil for all defaults).
+function ns:CreateProfile(name, modules)
+	ns.db.profiles[name] = { modules = modules or {} }
+end
+
+-- Deleting the active profile only takes effect for this session's settings after a reload;
+-- callers switch to another profile right after.
+function ns:DeleteProfile(name)
+	ns.db.profiles[name] = nil
+end
+
+-- Points this character at `name` and reloads so every module picks up its settings.
+function ns:SwitchProfile(name)
+	AdamAddonCharDB.profile = name
+	ReloadUI()
+end
+
+-- Profile settings without shared modules, for copying and exporting.
+function ns:GetProfileModules()
+	local modules = {}
+	for name, settings in pairs(ns.profile.modules) do
+		local module = ns:GetModule(name)
+		if type(settings) == "table" and not (module and module.shared) then
+			modules[name] = settings
+		end
+	end
+	return modules
+end
+
+local function SetupProfiles()
+	local db = ns.db
+
+	-- First load with profiles: the settings so far become the Default profile.
+	if next(db.profiles) == nil then
+		local moved = {}
+		for _, module in ipairs(ns.modules) do
+			if not module.shared and db.modules[module.name] ~= nil then
+				moved[module.name] = db.modules[module.name]
+				db.modules[module.name] = nil
+			end
+		end
+		db.profiles[ns.DEFAULT_PROFILE] = { modules = moved }
+	end
+
+	if type(AdamAddonCharDB) ~= "table" then
+		AdamAddonCharDB = {}
+	end
+
+	-- The character's profile, falling back to Default (or any profile) if it was deleted.
+	local name = AdamAddonCharDB.profile
+	if not ns:ProfileExists(name) then
+		if ns:ProfileExists(ns.DEFAULT_PROFILE) then
+			name = ns.DEFAULT_PROFILE
+		else
+			name = ns:GetProfileNames()[1]
+		end
+		if not name then
+			name = ns.DEFAULT_PROFILE
+			ns:CreateProfile(name)
+		end
+	end
+	AdamAddonCharDB.profile = name
+
+	local profile = db.profiles[name]
+	if type(profile.modules) ~= "table" then
+		profile.modules = {}
+	end
+	ns.profileName = name
+	ns.profile = profile
+end
+
+---------------------------------------------------------------------------
 -- Startup
 ---------------------------------------------------------------------------
 
@@ -248,10 +350,12 @@ local function OnAddonLoaded(event, loadedName)
 
 	AdamAddonDB = ApplyDefaults(AdamAddonDB or {}, ns.defaults)
 	ns.db = AdamAddonDB
+	SetupProfiles()
 
 	for _, module in ipairs(ns.modules) do
-		ns.db.modules[module.name] = ApplyDefaults(ns.db.modules[module.name] or {}, module.defaults or {})
-		module.db = ns.db.modules[module.name]
+		local store = module.shared and ns.db.modules or ns.profile.modules
+		store[module.name] = ApplyDefaults(store[module.name] or {}, module.defaults or {})
+		module.db = store[module.name]
 		if module.OnInit then
 			CallModule(module, "OnInit")
 		end

@@ -81,7 +81,7 @@ function Fonts:OnInit()
 	if self.db.migrated then
 		return
 	end
-	local modules = ns.db.modules
+	local modules = ns.profile.modules
 	local actionBars = modules.ActionBars
 	local unitFrames = modules.UnitFrames
 	local font = unitFrames and unitFrames.font

@@ -6,6 +6,7 @@
 ## X-Curse-Project-ID: 1760019
 ## Version: 0.1.0
 ## SavedVariables: AdamAddonDB
+## SavedVariablesPerCharacter: AdamAddonCharDB
 ## IconTexture: Interface\Icons\INV_Scroll_04
 ## AddonCompartmentFunc: AdamAddon_OnAddonCompartmentClick
 

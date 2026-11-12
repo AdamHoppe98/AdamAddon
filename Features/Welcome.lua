@@ -6,6 +6,7 @@ local addonName, ns = ...
 local Welcome = ns:RegisterModule("Welcome", {
 	title = "Welcome",
 	order = 0,
+	shared = true, -- the same in every profile
 	defaults = {
 		timesOpened = 0,
 	},
