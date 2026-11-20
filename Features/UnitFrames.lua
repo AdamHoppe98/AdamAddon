@@ -9,6 +9,8 @@ local addonName, ns = ...
 -- below, gold dragon for elites and bosses, silver for rares.
 -- Both: level centred on the portrait's bottom edge (the target's coloured by difficulty),
 -- and a crown centred on its top edge when the unit leads the group.
+-- Player portrait: damage taken and healing received fade in and out over the picture,
+-- like Blizzard's own player frame (UNIT_COMBAT, see CombatFeedback.lua).
 -- Target of target: a small bar with the name, right of the target.
 --
 -- The frames are secure unit buttons (click to target, right-click for the menu), so
@@ -56,7 +58,10 @@ local UnitFrames = ns:RegisterModule("UnitFrames", {
 		combatPlayerY = 0,
 		combatTargetX = 88,
 		combatTargetY = 0,
-		castBar = true,     -- target cast bar
+		hitText = true,       -- damage and heals in the player's portrait
+		hitTextSize = 20,     -- crits 1.5x, glancing blows and absorbs 0.75x
+		hitTextY = 0,         -- from the portrait's centre
+		castBar = true,    -- target cast bar
 		playerCastBar = true, -- the player's, like the target's, same settings; hides Blizzard's
 		playerCastDetached = false, -- its own size and place instead of under the player frame
 		playerCastWidth = 220,
@@ -119,6 +124,7 @@ local UNITS = {
 		druidMana = true,
 		powerPrefix = "playerMana",
 		showCombat = true,
+		showHitText = true,   -- damage and heals in the portrait
 		defaultPosition = { "CENTER", "CENTER", -260, -160 },
 	},
 	target = {
@@ -693,6 +699,137 @@ local function UpdateCombat(frame)
 	end
 end
 
+-- Damage and heals in the player's portrait. Same timing, colours and sizes as
+-- Blizzard's CombatFeedback (Blizzard_FrameXML/Mainline/CombatFeedback.lua).
+-- UNIT_COMBAT's amount can be secret: it then goes straight into BreakUpLargeNumbers
+-- and SetText (both accept secrets) and is never compared or formatted.
+local HIT_FADE_IN = 0.2
+local HIT_HOLD = 0.7
+local HIT_FADE_OUT = 0.3
+local HIT_DAMAGE_COLOR = { 1, 1, 1 }      -- physical
+local HIT_SPELL_DAMAGE_COLOR = { 1, 1, 0 } -- any other school
+local HIT_HEAL_COLOR = { 0, 1, 0 }
+local HIT_PREVIEW_TEXT = "1,234"
+
+-- Shown with a sample number while the Portrait Text page is open.
+local previewHitText = false
+
+-- Blizzard's words for misses, dodges and so on; its table, else the event name.
+local function GetFeedbackWord(key)
+	return (CombatFeedbackText and CombatFeedbackText[key]) or key
+end
+
+local function SetHitFont(text, scale)
+	local fontPath, outline = GetFont()
+	if not outline or outline == "" then
+		outline = "OUTLINE" -- readable on any portrait
+	end
+	local size = math.max(6, math.floor(UnitFrames.db.hitTextSize * scale + 0.5))
+	text:SetFont(fontPath, size, outline)
+end
+
+local function PlaceHitText(frame)
+	frame.HitText:ClearAllPoints()
+	frame.HitText:SetPoint("CENTER", frame.PortraitFrame, "CENTER", 0, UnitFrames.db.hitTextY)
+end
+
+local function HitTextOnUpdate(layer)
+	if previewHitText then
+		layer.Text:SetAlpha(1)
+		return
+	end
+	local elapsed = GetTime() - layer.startTime
+	if elapsed < HIT_FADE_IN then
+		layer.Text:SetAlpha(elapsed / HIT_FADE_IN)
+	elseif elapsed < HIT_FADE_IN + HIT_HOLD then
+		layer.Text:SetAlpha(1)
+	elseif elapsed < HIT_FADE_IN + HIT_HOLD + HIT_FADE_OUT then
+		layer.Text:SetAlpha(1 - (elapsed - HIT_FADE_IN - HIT_HOLD) / HIT_FADE_OUT)
+	else
+		layer:Hide()
+	end
+end
+
+-- Works out the text for one UNIT_COMBAT; nil = nothing to show (energize and the like).
+local function GetHitText(combatEvent, flags, amount, schoolMask)
+	local secret = IsSecret(amount)
+	if combatEvent == "WOUND" then
+		if secret or amount ~= 0 then
+			local scale = 1
+			if flags == "CRITICAL" or flags == "CRUSHING" then
+				scale = 1.5
+			elseif flags == "GLANCING" then
+				scale = 0.75
+			end
+			local color = HIT_DAMAGE_COLOR
+			if schoolMask ~= Enum.Damageclass.MaskPhysical then
+				color = HIT_SPELL_DAMAGE_COLOR
+			end
+			local text = BreakUpLargeNumbers(amount)
+			-- A string op on a secret string isn't allowed; the number alone then.
+			if flags == "BLOCK_REDUCED" and not secret and COMBAT_TEXT_BLOCK_REDUCED then
+				text = COMBAT_TEXT_BLOCK_REDUCED:format(text)
+			end
+			return text, color, scale
+		elseif flags == "ABSORB" or flags == "BLOCK" or flags == "RESIST" then
+			return GetFeedbackWord(flags), HIT_DAMAGE_COLOR, 0.75
+		end
+		return GetFeedbackWord("MISS"), HIT_DAMAGE_COLOR, 1
+	elseif combatEvent == "HEAL" then
+		return BreakUpLargeNumbers(amount), HIT_HEAL_COLOR, flags == "CRITICAL" and 1.5 or 1
+	elseif combatEvent == "IMMUNE" then
+		return GetFeedbackWord(combatEvent), HIT_DAMAGE_COLOR, 0.5
+	elseif combatEvent == "BLOCK" then
+		return GetFeedbackWord(combatEvent), HIT_DAMAGE_COLOR, 0.75
+	elseif combatEvent == "ENERGIZE" then
+		return nil
+	end
+	local word = CombatFeedbackText and CombatFeedbackText[combatEvent]
+	if word then
+		return word, HIT_DAMAGE_COLOR, 1
+	end
+	return nil
+end
+
+local function ShowHitText(frame, combatEvent, flags, amount, schoolMask)
+	local layer = frame.HitLayer
+	if not layer or previewHitText or not UnitFrames.db.hitText then
+		return
+	end
+	-- The event and flags are plain strings in the docs; check anyway before comparing.
+	if IsSecret(combatEvent) or IsSecret(flags) or IsSecret(schoolMask) then
+		return
+	end
+	local text, color, scale = GetHitText(combatEvent, flags, amount, schoolMask)
+	if not text then
+		return
+	end
+	SetHitFont(layer.Text, scale)
+	PlaceHitText(frame)
+	layer.Text:SetText(text)
+	layer.Text:SetTextColor(color[1], color[2], color[3])
+	layer.Text:SetAlpha(0)
+	layer.startTime = GetTime()
+	layer:Show()
+end
+
+local function UpdateHitPreview(frame)
+	local layer = frame.HitLayer
+	if not layer then
+		return
+	end
+	if previewHitText then
+		SetHitFont(layer.Text, 1)
+		PlaceHitText(frame)
+		layer.Text:SetText(HIT_PREVIEW_TEXT)
+		layer.Text:SetTextColor(unpack(HIT_HEAL_COLOR))
+		layer.Text:SetAlpha(1)
+		layer:Show()
+	else
+		layer:Hide()
+	end
+end
+
 -- Target cast bar. OnUpdate sets it every frame, always with small numbers: large ones
 -- (the raw cast times, milliseconds since the computer started) are stored too coarsely
 -- by the bar and make it move in steps. Three ways, best first:
@@ -848,6 +985,9 @@ local function UpdateAll(frame, smooth)
 	UpdateClassification(frame)
 	UpdateCombat(frame)
 	UpdateCast(frame)
+	if previewHitText then
+		UpdateHitPreview(frame) -- picks up a new size or position from the page
+	end
 	if frame.AuraContainers then
 		for _, auras in pairs(frame.AuraContainers) do
 			auras:UpdateAllAuras()
@@ -1283,6 +1423,22 @@ local function BuildFrame(key)
 		frame.LeaderIcon = levelLayer:CreateTexture(nil, "OVERLAY")
 		frame.LeaderIcon:SetAtlas(LEADER_ICON_ATLAS)
 		frame.LeaderIcon:Hide()
+
+		if info.showHitText then
+			-- Over the picture, under the level text. A plain (not secure) child, so it
+			-- can show and hide in combat; OnUpdate only runs while it's shown.
+			local hitLayer = CreateFrame("Frame", nil, frame)
+			hitLayer:SetAllPoints(portraitFrame)
+			hitLayer:SetFrameLevel(baseLevel + 9)
+			hitLayer.Text = hitLayer:CreateFontString(nil, "OVERLAY")
+			hitLayer.Text:SetJustifyH("CENTER")
+			hitLayer.Text:SetWordWrap(false)
+			hitLayer.startTime = 0
+			hitLayer:SetScript("OnUpdate", HitTextOnUpdate)
+			hitLayer:Hide()
+			frame.HitLayer = hitLayer
+			frame.HitText = hitLayer.Text
+		end
 	end
 
 	if info.showAuras then
@@ -1904,6 +2060,15 @@ function UnitFrames:OnCombatChanged()
 	end
 end
 
+-- UNIT_COMBAT: the unit took damage, was healed, dodged, ... Only the player's portrait
+-- shows it.
+function UnitFrames:OnUnitCombat(event, unit, combatEvent, flags, amount, schoolMask)
+	if unit ~= "player" or not frames.player or not frames.player:IsShown() then
+		return
+	end
+	ShowHitText(frames.player, combatEvent, flags, amount, schoolMask)
+end
+
 function UnitFrames:OnCombatEnded()
 	if pendingApply and self.db then
 		self:Apply()
@@ -1935,6 +2100,7 @@ UnitFrames:RegisterEvent("UNIT_PORTRAIT_UPDATE", "OnUnitPortrait")
 UnitFrames:RegisterEvent("UNIT_MODEL_CHANGED", "OnUnitPortrait")
 UnitFrames:RegisterEvent("UNIT_CLASSIFICATION_CHANGED", "OnUnitClassification")
 UnitFrames:RegisterEvent("UNIT_FLAGS", "OnUnitFlags")
+UnitFrames:RegisterEvent("UNIT_COMBAT", "OnUnitCombat")
 for _, event in ipairs({
 	"UNIT_SPELLCAST_START", "UNIT_SPELLCAST_STOP", "UNIT_SPELLCAST_FAILED",
 	"UNIT_SPELLCAST_INTERRUPTED", "UNIT_SPELLCAST_DELAYED",
@@ -2311,12 +2477,12 @@ function CombatPage:CreatePage(page)
 	local playerHeader = CreateLabel(page, "Player", "GameFontNormal")
 	playerHeader:SetPoint("TOPLEFT", sizeLabel, "BOTTOMLEFT", 0, -24)
 	local _, playerXLabel = CreateSlider(UnitFrames, page, playerHeader, "X", "combatPlayerX", { 0, 400, 400 })
-	local _, playerYLabel = CreateSlider(UnitFrames, page, playerXLabel, "Y", "combatPlayerY", { -40, 40, 80 })
+	local _, playerYLabel = CreateSlider(UnitFrames, page, playerXLabel, "Y", "combatPlayerY", { -100, 100, 200 })
 
 	local targetHeader = CreateLabel(page, "Target", "GameFontNormal")
 	targetHeader:SetPoint("TOPLEFT", playerYLabel, "BOTTOMLEFT", 0, -24)
 	local _, targetXLabel = CreateSlider(UnitFrames, page, targetHeader, "X", "combatTargetX", { 0, 400, 400 })
-	CreateSlider(UnitFrames, page, targetXLabel, "Y", "combatTargetY", { -40, 40, 80 })
+	CreateSlider(UnitFrames, page, targetXLabel, "Y", "combatTargetY", { -100, 100, 200 })
 
 	page:HookScript("OnHide", function()
 		previewCombatIcon = false
@@ -2330,6 +2496,46 @@ function CombatPage:OnPageShown(page)
 	previewCombatIcon = true
 	for _, frame in pairs(frames) do
 		UpdateCombat(frame)
+	end
+end
+
+-- Portrait text (damage and heals)
+
+local HitTextPage = RegisterSubPage("UnitFramesHitText", "Portrait Text", 22.75)
+
+function HitTextPage:CreatePage(page)
+	local _, below = CreatePageHeader(page, "Portrait Text",
+		"Damage you take and healing you receive, shown in the player portrait for a moment. "
+		.. "White: physical damage, yellow: spell damage, green: heals. Crits are bigger. "
+		.. "A sample shows while this page is open.")
+
+	local showCheck = CreateCheck(page, "Show damage and heals in the player portrait", UnitFrames.db.hitText, function(checked)
+		UnitFrames.db.hitText = checked
+		if not checked and frames.player and frames.player.HitLayer and not previewHitText then
+			frames.player.HitLayer:Hide()
+		end
+	end)
+	showCheck:SetPoint("TOPLEFT", below, "BOTTOMLEFT", -4, -6)
+
+	local anchor = CreateFrame("Frame", nil, page)
+	anchor:SetPoint("TOPLEFT", showCheck, "BOTTOMLEFT", 4, 0)
+	anchor:SetSize(1, 1)
+
+	local _, sizeLabel = CreateSlider(UnitFrames, page, anchor, "Text size", "hitTextSize", { 8, 40, 32 })
+	CreateSlider(UnitFrames, page, sizeLabel, "Y", "hitTextY", { -30, 30, 60 })
+
+	page:HookScript("OnHide", function()
+		previewHitText = false
+		if frames.player then
+			UpdateHitPreview(frames.player)
+		end
+	end)
+end
+
+function HitTextPage:OnPageShown(page)
+	previewHitText = true
+	if frames.player then
+		UpdateHitPreview(frames.player)
 	end
 end
 
