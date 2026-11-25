@@ -32,6 +32,7 @@ Features\TrackedBuffs.lua
 Features\MissingBuffs.lua
 Features\PowerBar.lua
 Features\ManaSpark.lua
+Features\PvPFlag.lua
 Features\SwingTimers.lua
 Features\ItemText.lua
 Features\Cheapest.lua
